@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corticalfields"
+version = "0.1.0"
+description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors and information-theoretic surprise maps."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Velho Mago (rdneuro)", email = "rdneuro@github.com"},
+]
+keywords = [
+    "neuroimaging", "cortical-surface", "gaussian-process",
+    "normative-modeling", "epilepsy", "heat-kernel-signature",
+    "laplace-beltrami", "surprise-maps", "spectral-analysis",
+    "bayesian-inference",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "nibabel>=5.0",
+    "torch>=2.0",
+    "gpytorch>=1.11",
+    "scikit-sparse>=0.4",
+    "trimesh>=4.0",
+    "pyvista>=0.42",
+    "matplotlib>=3.7",
+    "tqdm>=4.65",
+    "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+full = [
+    "robust-laplacian>=0.2",
+    "potpourri3d>=0.0.8",
+    "geometric-kernels>=0.2",
+    "pymc>=5.10",
+    "giotto-tda>=0.6",
+    "torch-geometric>=2.4",
+    "surfplot>=0.2",
+    "brainspace>=0.1",
+    "neuromaps>=0.0.4",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/rdneuro/corticalfields"
+Documentation = "https://corticalfields.readthedocs.io"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
