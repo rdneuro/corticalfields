@@ -26,8 +26,25 @@ Exact GP inference on ~150k vertices is intractable (O(N³)). We use:
   • **Minibatch training**: stochastic variational inference allows
     training on subsets of vertices per epoch.
 
-The combination enables training in ~10–30 minutes per feature on
-a single GPU (RTX 3090/4070).
+Vertex alignment
+----------------
+The SpectralMaternKernel operates on vertex **indices** from the LB
+eigenvector matrix, which has N_lb rows (one per mesh vertex).
+Feature data (thickness, curvature, etc.) may have a **different**
+number of vertices N_data — for example, when the medial wall is
+masked out, or features were projected to a different template.
+
+To handle this, the model maintains a ``vertex_mask``:
+  • If N_data == N_lb: no mask needed, 1-to-1 correspondence.
+  • If N_data < N_lb: the user provides a boolean mask of shape
+    (N_lb,) with exactly N_data True entries, or passes full-mesh
+    data with NaN at excluded vertices (auto-detection).
+  • If N_data > N_lb: error.
+
+All internal operations (inducing point selection, kernel evaluation,
+GP training/prediction) happen in LB-index space. The mask maps
+between "data space" (what the user provides) and "mesh space"
+(what the kernel needs).
 """
 
 from __future__ import annotations
@@ -56,18 +73,12 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Variational GP model
+# Variational GP model (internal)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class _SurfaceGP(ApproximateGP):
-    """
-    Sparse variational GP on the cortical surface.
-
-    Uses vertex indices as inputs (not 3D coordinates) and a
-    SpectralMaternKernel that evaluates the kernel via the
-    pre-computed LB eigenpairs.
-    """
+    """Sparse variational GP on the cortical surface."""
 
     def __init__(
         self,
@@ -76,11 +87,9 @@ class _SurfaceGP(ApproximateGP):
         nu: float = 2.5,
         learn_inducing_locations: bool = False,
     ):
-        # Variational distribution: Cholesky parameterisation
         variational_distribution = CholeskyVariationalDistribution(
             inducing_points.size(0),
         )
-        # Variational strategy
         variational_strategy = VariationalStrategy(
             self,
             inducing_points=inducing_points,
@@ -89,23 +98,17 @@ class _SurfaceGP(ApproximateGP):
         )
         super().__init__(variational_strategy)
 
-        # Mean function: constant (learned)
         self.mean_module = gpytorch.means.ConstantMean()
-
-        # Covariance: spectral Matérn on the cortical manifold
         self.covar_module = SpectralMaternKernel(lb=lb, nu=nu)
 
     def forward(self, x: torch.Tensor) -> MultivariateNormal:
-        """
-        Compute the prior GP distribution at vertex indices x.
-        """
         mean = self.mean_module(x.float())
         covar = self.covar_module(x, x)
         return MultivariateNormal(mean, covar)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Normative model
+# Result container
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -114,20 +117,9 @@ class NormativeResult:
     """
     Result of normative prediction for a single subject.
 
-    Attributes
-    ----------
-    mean : np.ndarray, shape (N,)
-        Posterior predictive mean (expected feature value under the norm).
-    variance : np.ndarray, shape (N,)
-        Posterior predictive variance.
-    z_score : np.ndarray, shape (N,)
-        Standardised deviation: (observed − mean) / std.
-    surprise : np.ndarray, shape (N,)
-        Negative log-predictive density: −log p(y | x, model).
-    observed : np.ndarray, shape (N,)
-        The observed feature values.
-    feature_name : str
-        Name of the feature modelled.
+    All arrays have the same shape as the input the user provided:
+    (N_data,) if masked data was given, or (N_lb,) if full-mesh data.
+    The model handles the mapping internally.
     """
 
     mean: np.ndarray
@@ -138,12 +130,135 @@ class NormativeResult:
     feature_name: str = ""
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Vertex mask helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _resolve_vertex_mask(
+    n_data: int,
+    n_lb: int,
+    vertex_mask: Optional[np.ndarray],
+    data_for_nan_detection: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    """
+    Resolve the mapping between data-space and LB-mesh-space.
+
+    Returns None when N_data == N_lb (no mapping needed), or a
+    validated boolean mask of shape (N_lb,) otherwise.
+    """
+    # ── Perfect alignment: no mask needed ─────────────────────────
+    if n_data == n_lb:
+        if vertex_mask is not None:
+            logger.info(
+                "Data has %d vertices = LB mesh vertices. "
+                "Ignoring vertex_mask (not needed).", n_data,
+            )
+        return None
+
+    # ── Data has MORE vertices than mesh: impossible ──────────────
+    if n_data > n_lb:
+        raise ValueError(
+            f"Data has {n_data} vertices but the LB eigenpairs were "
+            f"computed on a mesh with only {n_lb} vertices. Data cannot "
+            f"have more vertices than the mesh. Ensure you compute "
+            f"eigenpairs on the same surface template that your features "
+            f"are registered to."
+        )
+
+    # ── Data has FEWER vertices: we need a mask ───────────────────
+
+    # Option 1: user provided a mask explicitly
+    if vertex_mask is not None:
+        mask = np.asarray(vertex_mask, dtype=bool)
+        if mask.shape[0] != n_lb:
+            raise ValueError(
+                f"vertex_mask has {mask.shape[0]} entries but LB mesh "
+                f"has {n_lb} vertices. Shape must be ({n_lb},)."
+            )
+        n_true = int(mask.sum())
+        if n_true != n_data:
+            raise ValueError(
+                f"vertex_mask has {n_true} True entries but data has "
+                f"{n_data} vertices. These must match exactly."
+            )
+        logger.info(
+            "Using provided vertex_mask: %d/%d vertices valid (%.1f%%).",
+            n_true, n_lb, 100 * n_true / n_lb,
+        )
+        return mask
+
+    # Option 2: auto-detect from full-mesh data with NaN pattern
+    if data_for_nan_detection is not None:
+        d = data_for_nan_detection
+        if d.shape[0] == n_lb:
+            if d.ndim == 1:
+                mask = np.isfinite(d)
+            else:
+                mask = np.any(np.isfinite(d), axis=1)
+
+            n_true = int(mask.sum())
+            if n_true == n_data:
+                logger.info(
+                    "Auto-detected vertex_mask from NaN pattern: "
+                    "%d/%d vertices valid.", n_true, n_lb,
+                )
+                return mask
+
+    # Option 3: cannot resolve — give a helpful error
+    raise ValueError(
+        f"Shape mismatch: data has {n_data} vertices but the LB "
+        f"eigenpairs were computed on a mesh with {n_lb} vertices.\n\n"
+        f"This typically happens when:\n"
+        f"  • The medial wall was excluded from the feature data but\n"
+        f"    not from the surface mesh used for eigenpairs.\n"
+        f"  • Features were projected to a different resolution template.\n\n"
+        f"To fix this, either:\n"
+        f"  (a) Provide vertex_mask= a boolean array of shape ({n_lb},)\n"
+        f"      with exactly {n_data} True entries. Example:\n"
+        f"        model.fit(data, vertex_mask=~medial_wall_mask)\n\n"
+        f"  (b) Pass FULL mesh-space data (shape ({n_lb},) or ({n_lb}, S))\n"
+        f"      with NaN at excluded vertices — auto-detection will work.\n\n"
+        f"  (c) Recompute the LB eigenpairs on the same surface that\n"
+        f"      your features are registered to (recommended)."
+    )
+
+
+def _data_to_mesh(
+    data: np.ndarray,
+    mask: Optional[np.ndarray],
+    n_lb: int,
+    fill_value: float = 0.0,
+) -> np.ndarray:
+    """Expand data-space → full LB-mesh-space (fills masked vertices)."""
+    if mask is None:
+        return data.copy()
+    if data.ndim == 1:
+        full = np.full(n_lb, fill_value, dtype=np.float64)
+        full[mask] = data
+    else:
+        full = np.full((n_lb, data.shape[1]), fill_value, dtype=np.float64)
+        full[mask] = data
+    return full
+
+
+def _mesh_to_data(full: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
+    """Extract data-space from full LB-mesh-space."""
+    if mask is None:
+        return full
+    return full[mask]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Normative model
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 class CorticalNormativeModel:
     """
     GP-based normative model for a single cortical feature.
 
-    This is the main user-facing class for normative modeling. It
-    wraps training, prediction, and anomaly scoring into a clean API.
+    Handles vertex-mesh alignment transparently via vertex_mask.
 
     Parameters
     ----------
@@ -158,18 +273,18 @@ class CorticalNormativeModel:
 
     Examples
     --------
-    >>> # 1. Build LB eigenpairs on the template surface
-    >>> lb = compute_eigenpairs(template_verts, template_faces, n_eigenpairs=300)
-    >>>
-    >>> # 2. Create normative model
+    >>> # CASE 1: Data matches LB mesh — no mask needed
     >>> model = CorticalNormativeModel(lb, nu=2.5, n_inducing=512)
+    >>> model.fit(train_features)  # shape (N_lb,) or (N_lb, S)
     >>>
-    >>> # 3. Train on reference cohort
-    >>> model.fit(train_features, n_epochs=100, lr=0.01)
+    >>> # CASE 2: Data has fewer vertices (medial wall excluded)
+    >>> # Option A — provide a vertex_mask explicitly
+    >>> model.fit(data, vertex_mask=~medial_wall_mask)
     >>>
-    >>> # 4. Score a patient
-    >>> result = model.predict(patient_features)
-    >>> surprise_map = result.surprise  # vertex-wise anomaly scores
+    >>> # Option B — pass full-mesh data with NaN at excluded vertices
+    >>> full_data = np.full(N_lb, np.nan)
+    >>> full_data[~medial_wall] = reduced_data
+    >>> model.fit(full_data)  # auto-detects mask
     """
 
     def __init__(
@@ -190,52 +305,76 @@ class CorticalNormativeModel:
         self._likelihood: Optional[gpytorch.likelihoods.GaussianLikelihood] = None
         self._is_fitted = False
         self._feature_name = ""
-
-        # Training statistics for normalisation
         self._train_mean: float = 0.0
         self._train_std: float = 1.0
 
+        # Vertex alignment state
+        self._vertex_mask: Optional[np.ndarray] = None  # shape (N_lb,) bool
+        self._n_data: int = 0
+
+    @property
+    def n_mesh_vertices(self) -> int:
+        """Number of vertices in the LB mesh."""
+        return self.lb.n_vertices
+
+    @property
+    def n_data_vertices(self) -> int:
+        """Number of valid data vertices (after masking)."""
+        return self._n_data if self._is_fitted else self.n_mesh_vertices
+
+    @property
+    def vertex_mask(self) -> Optional[np.ndarray]:
+        """Boolean mask (N_lb,) mapping mesh → data, or None."""
+        return self._vertex_mask
+
     def _select_inducing_points(
-        self, n_vertices: int,
+        self,
+        valid_vertex_indices: np.ndarray,
     ) -> torch.Tensor:
         """
-        Select inducing point vertex indices.
+        Farthest-point sampling in GPS space, restricted to valid vertices.
 
-        Uses farthest-point sampling in the spectral embedding (GPS)
-        for geometrically uniform coverage of the cortical surface.
-        Falls back to random sampling if GPS is unavailable.
+        The GPS embedding lives in LB-mesh space (one row per mesh vertex).
+        We restrict FPS to only sample from vertices that have valid data.
+        The returned indices are in LB-mesh space (ready for the kernel).
         """
         rng = np.random.RandomState(self.seed)
 
-        # Use GPS embedding for FPS
         from corticalfields.spectral import global_point_signature
+        gps_full = global_point_signature(self.lb, n_components=20)
 
-        gps_embed = global_point_signature(self.lb, n_components=20)
+        # Restrict GPS to valid vertices only
+        gps_valid = gps_full[valid_vertex_indices]  # (N_valid, 20)
+        N_valid = len(valid_vertex_indices)
 
-        # Farthest point sampling in GPS space
-        n = min(self.n_inducing, n_vertices)
-        indices = np.zeros(n, dtype=np.int64)
-        indices[0] = rng.randint(n_vertices)
-        dists = np.full(n_vertices, np.inf)
+        n = min(self.n_inducing, N_valid)
+        local_indices = np.zeros(n, dtype=np.int64)
+        local_indices[0] = rng.randint(N_valid)
+        dists = np.full(N_valid, np.inf)
 
         for i in range(1, n):
             new_dists = np.linalg.norm(
-                gps_embed - gps_embed[indices[i - 1]], axis=1,
+                gps_valid - gps_valid[local_indices[i - 1]], axis=1,
             )
             dists = np.minimum(dists, new_dists)
-            indices[i] = np.argmax(dists)
+            local_indices[i] = np.argmax(dists)
+
+        # Map local indices → LB mesh indices
+        mesh_indices = valid_vertex_indices[local_indices]
 
         logger.info(
-            "Selected %d inducing points via farthest-point sampling in GPS space.",
-            n,
+            "Selected %d inducing points via FPS in GPS space "
+            "(%d valid / %d mesh vertices).",
+            n, N_valid, self.n_mesh_vertices,
         )
 
-        return torch.tensor(indices, dtype=torch.long).unsqueeze(-1).to(self.device)
+        return torch.tensor(mesh_indices, dtype=torch.long).unsqueeze(-1).to(self.device)
 
     def fit(
         self,
         train_features: np.ndarray,
         feature_name: str = "thickness",
+        vertex_mask: Optional[np.ndarray] = None,
         n_epochs: int = 100,
         lr: float = 0.01,
         batch_size: int = 4096,
@@ -247,89 +386,103 @@ class CorticalNormativeModel:
         Parameters
         ----------
         train_features : np.ndarray, shape (N,) or (N, S)
-            Per-vertex feature values. If 2D, each column is a subject;
-            the model is trained on the mean across subjects (for the
-            population-level normative model), and the variance informs
-            the likelihood noise.
+            Per-vertex feature values. N can be N_lb (full mesh) or
+            < N_lb (masked). If 2D, columns are subjects.
         feature_name : str
-            Name of the feature (for bookkeeping).
+            Name of the feature being modelled.
+        vertex_mask : np.ndarray, shape (N_lb,), dtype bool, or None
+            Which LB mesh vertices have data. Required when N < N_lb
+            unless auto-detection from NaN works.
         n_epochs : int
-            Number of training epochs (passes through inducing pts).
+            Training epochs.
         lr : float
-            Learning rate for Adam.
+            Learning rate.
         batch_size : int
-            Minibatch size (number of vertices per step).
+            Minibatch size (vertices per step).
         verbose : bool
             Show progress bar.
 
         Returns
         -------
-        history : dict
-            Training loss history (``'loss'`` key).
+        history : dict with 'loss' key
         """
         self._feature_name = feature_name
+        N_lb = self.n_mesh_vertices
 
-        # Handle multi-subject input: mean across subjects
+        # ── Multi-subject → single training vector ───────────────
         if train_features.ndim == 2:
+            N_rows, S = train_features.shape
             logger.info(
-                "Training on mean of %d subjects (%d vertices each).",
-                train_features.shape[1], train_features.shape[0],
+                "Training on mean of %d subjects (%d vertices each).", S, N_rows,
             )
-            y_train = np.nanmean(train_features, axis=1)
+            y_raw = np.nanmean(train_features, axis=1)
         else:
-            y_train = train_features.copy()
+            N_rows = train_features.shape[0]
+            y_raw = train_features.copy()
 
-        N = y_train.shape[0]
+        # ── Resolve vertex mask ──────────────────────────────────
+        self._vertex_mask = _resolve_vertex_mask(
+            n_data=N_rows,
+            n_lb=N_lb,
+            vertex_mask=vertex_mask,
+            data_for_nan_detection=(train_features if N_rows == N_lb else None),
+        )
 
-        # Normalise (z-score) for stable GP training
-        self._train_mean = float(np.nanmean(y_train))
-        self._train_std = float(np.nanstd(y_train))
+        # ── Map to full mesh space ───────────────────────────────
+        if self._vertex_mask is not None:
+            y_mesh = _data_to_mesh(y_raw, self._vertex_mask, N_lb, fill_value=np.nan)
+            valid_mask = self._vertex_mask & np.isfinite(y_mesh)
+        else:
+            y_mesh = y_raw
+            valid_mask = np.isfinite(y_mesh)
+
+        self._n_data = int(valid_mask.sum())
+        logger.info(
+            "Vertex alignment: %d mesh, %d valid data (%.1f%%).",
+            N_lb, self._n_data, 100 * self._n_data / N_lb,
+        )
+
+        # ── Valid vertex indices (LB mesh space) ─────────────────
+        valid_idx = np.where(valid_mask)[0].astype(np.int64)
+        y_valid = y_mesh[valid_mask]
+
+        # ── Normalise ────────────────────────────────────────────
+        self._train_mean = float(np.nanmean(y_valid))
+        self._train_std = float(np.nanstd(y_valid))
         if self._train_std < 1e-8:
             self._train_std = 1.0
-        y_norm = (y_train - self._train_mean) / self._train_std
+        y_norm = (y_valid - self._train_mean) / self._train_std
 
-        # Replace NaN with 0 (masked vertices)
-        nan_mask = np.isnan(y_norm)
-        y_norm[nan_mask] = 0.0
-
-        # Vertex indices as input
-        x_train = torch.arange(N, dtype=torch.long).unsqueeze(-1).to(self.device)
+        # ── Tensors ──────────────────────────────────────────────
+        x_train = torch.tensor(valid_idx, dtype=torch.long).unsqueeze(-1).to(self.device)
         y_train_t = torch.tensor(y_norm, dtype=torch.float64).to(self.device)
+        N_valid = len(valid_idx)
 
-        # Select inducing points
-        inducing_pts = self._select_inducing_points(N)
+        # ── Inducing points (in mesh space, from valid only) ─────
+        inducing_pts = self._select_inducing_points(valid_idx)
 
-        # Build model
+        # ── Build model ──────────────────────────────────────────
         self._likelihood = gpytorch.likelihoods.GaussianLikelihood().double()
         self._likelihood = self._likelihood.to(self.device)
-
         self._model = _SurfaceGP(
-            inducing_points=inducing_pts,
-            lb=self.lb,
-            nu=self.nu,
-        ).double()
-        self._model = self._model.to(self.device)
+            inducing_points=inducing_pts, lb=self.lb, nu=self.nu,
+        ).double().to(self.device)
 
-        # Training mode
         self._model.train()
         self._likelihood.train()
 
-        # Optimiser
         optimizer = torch.optim.Adam(
             list(self._model.parameters()) + list(self._likelihood.parameters()),
             lr=lr,
         )
+        mll = VariationalELBO(self._likelihood, self._model, num_data=N_valid)
 
-        # Variational ELBO objective
-        mll = VariationalELBO(self._likelihood, self._model, num_data=N)
-
-        # Training loop
+        # ── Training loop ────────────────────────────────────────
         history: Dict[str, List[float]] = {"loss": []}
         iterator = trange(n_epochs, desc=f"Training [{feature_name}]", disable=not verbose)
 
         for epoch in iterator:
-            # Minibatch sampling
-            perm = torch.randperm(N, device=self.device)[:batch_size]
+            perm = torch.randperm(N_valid, device=self.device)[:batch_size]
             x_batch = x_train[perm]
             y_batch = y_train_t[perm]
 
@@ -351,18 +504,18 @@ class CorticalNormativeModel:
 
         self._is_fitted = True
         logger.info(
-            "Training complete. Final loss: %.4f, lengthscale: %.2f mm, noise: %.4f",
+            "Training complete. Loss: %.4f, lengthscale: %.2f mm, noise: %.4f",
             history["loss"][-1],
             self._model.covar_module.lengthscale.item(),
             self._likelihood.noise.item(),
         )
-
         return history
 
     @torch.no_grad()
     def predict(
         self,
         observed_features: np.ndarray,
+        vertex_mask: Optional[np.ndarray] = None,
         batch_size: int = 5000,
     ) -> NormativeResult:
         """
@@ -371,14 +524,17 @@ class CorticalNormativeModel:
         Parameters
         ----------
         observed_features : np.ndarray, shape (N,)
-            Observed per-vertex feature values for the patient.
+            Observed per-vertex feature values. N can be N_lb (full
+            mesh) or N_data (masked — must match training).
+        vertex_mask : np.ndarray or None
+            Overrides the training mask for this patient if provided.
         batch_size : int
             Prediction batch size.
 
         Returns
         -------
         NormativeResult
-            Contains mean, variance, z-score, and surprise maps.
+            All arrays match the input shape (N,).
         """
         if not self._is_fitted:
             raise RuntimeError("Model not fitted. Call .fit() first.")
@@ -386,59 +542,99 @@ class CorticalNormativeModel:
         self._model.eval()
         self._likelihood.eval()
 
-        N = observed_features.shape[0]
+        N_input = observed_features.shape[0]
+        N_lb = self.n_mesh_vertices
 
-        # Normalise observed values using training statistics
-        y_obs_norm = (observed_features - self._train_mean) / self._train_std
+        # ── Resolve mask for prediction ──────────────────────────
+        pred_mask = vertex_mask if vertex_mask is not None else self._vertex_mask
 
-        # Predict in batches
-        means = np.zeros(N, dtype=np.float64)
-        variances = np.zeros(N, dtype=np.float64)
+        # ── Map to mesh space ────────────────────────────────────
+        if N_input == N_lb:
+            obs_mesh = observed_features.copy()
+            if pred_mask is not None:
+                valid_mask = pred_mask & np.isfinite(obs_mesh)
+            else:
+                valid_mask = np.isfinite(obs_mesh)
+            return_in_mesh_space = True
 
-        x_all = torch.arange(N, dtype=torch.long).unsqueeze(-1).to(self.device)
+        elif pred_mask is not None and N_input == int(pred_mask.sum()):
+            obs_mesh = _data_to_mesh(observed_features, pred_mask, N_lb, fill_value=np.nan)
+            valid_mask = pred_mask & np.isfinite(obs_mesh)
+            return_in_mesh_space = False
 
-        for start in range(0, N, batch_size):
-            end = min(start + batch_size, N)
-            x_batch = x_all[start:end]
+        elif self._vertex_mask is not None and N_input == self._n_data:
+            pred_mask = self._vertex_mask
+            obs_mesh = _data_to_mesh(observed_features, pred_mask, N_lb, fill_value=np.nan)
+            valid_mask = pred_mask & np.isfinite(obs_mesh)
+            return_in_mesh_space = False
 
+        else:
+            raise ValueError(
+                f"Cannot align patient data ({N_input} vertices) with "
+                f"LB mesh ({N_lb} vertices). Expected {N_lb} or "
+                f"{self._n_data} vertices, or provide vertex_mask."
+            )
+
+        # ── Normalise ────────────────────────────────────────────
+        y_norm_mesh = (obs_mesh - self._train_mean) / self._train_std
+
+        # ── Predict at valid vertices ────────────────────────────
+        valid_idx = np.where(valid_mask)[0].astype(np.int64)
+        N_valid = len(valid_idx)
+
+        means_mesh = np.full(N_lb, np.nan, dtype=np.float64)
+        vars_mesh = np.full(N_lb, np.nan, dtype=np.float64)
+
+        for start in range(0, N_valid, batch_size):
+            end = min(start + batch_size, N_valid)
+            batch_idx = valid_idx[start:end]
+            x_batch = torch.tensor(batch_idx, dtype=torch.long).unsqueeze(-1).to(self.device)
             pred = self._likelihood(self._model(x_batch))
-            means[start:end] = pred.mean.cpu().numpy()
-            variances[start:end] = pred.variance.cpu().numpy()
+            means_mesh[batch_idx] = pred.mean.cpu().numpy()
+            vars_mesh[batch_idx] = pred.variance.cpu().numpy()
 
-        # De-normalise to original scale
-        means_orig = means * self._train_std + self._train_mean
-        variances_orig = variances * (self._train_std ** 2)
+        # ── Scores in mesh space ─────────────────────────────────
+        means_orig = means_mesh * self._train_std + self._train_mean
+        vars_orig = vars_mesh * (self._train_std ** 2)
 
-        # Z-scores in normalised space (more statistically appropriate)
-        std_norm = np.sqrt(np.maximum(variances, 1e-12))
-        z_scores = (y_obs_norm - means) / std_norm
-
-        # Surprise: negative log-predictive density under Gaussian
-        # -log N(y | μ, σ²) = ½ log(2πσ²) + (y - μ)² / (2σ²)
-        surprise = (
-            0.5 * np.log(2.0 * np.pi * np.maximum(variances, 1e-12))
-            + 0.5 * (y_obs_norm - means) ** 2 / np.maximum(variances, 1e-12)
+        std_norm = np.sqrt(np.maximum(vars_mesh, 1e-12))
+        z_scores = np.full(N_lb, np.nan, dtype=np.float64)
+        z_scores[valid_mask] = (
+            (y_norm_mesh[valid_mask] - means_mesh[valid_mask]) / std_norm[valid_mask]
         )
 
-        return NormativeResult(
-            mean=means_orig,
-            variance=variances_orig,
-            z_score=z_scores,
-            surprise=surprise,
-            observed=observed_features,
-            feature_name=self._feature_name,
+        surprise = np.full(N_lb, np.nan, dtype=np.float64)
+        surprise[valid_mask] = (
+            0.5 * np.log(2.0 * np.pi * np.maximum(vars_mesh[valid_mask], 1e-12))
+            + 0.5 * z_scores[valid_mask] ** 2
         )
+
+        # ── Return in input space ────────────────────────────────
+        if return_in_mesh_space:
+            return NormativeResult(
+                mean=means_orig, variance=vars_orig,
+                z_score=z_scores, surprise=surprise,
+                observed=observed_features, feature_name=self._feature_name,
+            )
+        else:
+            return NormativeResult(
+                mean=_mesh_to_data(means_orig, pred_mask),
+                variance=_mesh_to_data(vars_orig, pred_mask),
+                z_score=_mesh_to_data(z_scores, pred_mask),
+                surprise=_mesh_to_data(surprise, pred_mask),
+                observed=observed_features, feature_name=self._feature_name,
+            )
+
+    # ── Persistence ───────────────────────────────────────────────
 
     def save(self, path: Union[str, Path]) -> None:
         """Save the trained model to disk."""
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # Model state
         torch.save(self._model.state_dict(), path / "model_state.pt")
         torch.save(self._likelihood.state_dict(), path / "likelihood_state.pt")
 
-        # Training statistics
         meta = {
             "nu": self.nu,
             "n_inducing": self.n_inducing,
@@ -446,9 +642,12 @@ class CorticalNormativeModel:
             "train_std": self._train_std,
             "feature_name": self._feature_name,
             "n_eigenpairs": self.lb.n_eigenpairs,
-            "n_vertices": self.lb.n_vertices,
+            "n_lb_vertices": self.lb.n_vertices,
+            "n_data_vertices": self._n_data,
         }
         np.savez(path / "meta.npz", **meta)
+        if self._vertex_mask is not None:
+            np.save(path / "vertex_mask.npy", self._vertex_mask)
         logger.info("Model saved to %s", path)
 
     def load(self, path: Union[str, Path]) -> None:
@@ -459,9 +658,17 @@ class CorticalNormativeModel:
         self._train_mean = float(meta["train_mean"])
         self._train_std = float(meta["train_std"])
         self._feature_name = str(meta["feature_name"])
+        self._n_data = int(meta["n_data_vertices"])
 
-        # Reconstruct model with same inducing points
-        inducing_pts = self._select_inducing_points(self.lb.n_vertices)
+        mask_path = path / "vertex_mask.npy"
+        self._vertex_mask = np.load(mask_path) if mask_path.exists() else None
+
+        if self._vertex_mask is not None:
+            valid_idx = np.where(self._vertex_mask)[0].astype(np.int64)
+        else:
+            valid_idx = np.arange(self.lb.n_vertices, dtype=np.int64)
+
+        inducing_pts = self._select_inducing_points(valid_idx)
         self._likelihood = gpytorch.likelihoods.GaussianLikelihood().double()
         self._model = _SurfaceGP(
             inducing_points=inducing_pts, lb=self.lb, nu=self.nu,
@@ -473,9 +680,7 @@ class CorticalNormativeModel:
         self._likelihood.load_state_dict(
             torch.load(path / "likelihood_state.pt", map_location=self.device)
         )
-
         self._model = self._model.to(self.device)
         self._likelihood = self._likelihood.to(self.device)
         self._is_fitted = True
-
         logger.info("Model loaded from %s", path)
