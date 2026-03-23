@@ -94,6 +94,30 @@ surprise_map = compute_surprise(
 network_scores = surprise_map.aggregate_by_network(yeo_labels, yeo_names)
 ```
 
+## Practical GPU-Backend Use
+The library offers 3 different backend for computational demanding operations. "Scipy" equation solving offers practical, however slower, CPU-based work. "Cupy" or "Torch" backends speeds up the operations through GPU mathemathical operations improved performance.
+
+```python
+import corticalfields as cf
+
+# Check what's available
+print(cf.available_backends())
+# → {'scipy': True, 'cupy': True, 'torch': True}
+
+# GPU eigensolver + GPU descriptors (3-10× faster)
+lb = cf.spectral.compute_eigenpairs(
+    surf.vertices, surf.faces,
+    n_eigenpairs=300,
+    backend="cupy",        # ← CuPy LOBPCG on GPU
+    dtype="float32",       # ← 2× less VRAM, often faster
+)
+
+# GPU descriptors (10-30× faster for GEMM)
+features = cf.spectral.spectral_feature_matrix(
+    lb, backend="cupy",    # ← cuBLAS GEMM on GPU
+)
+```
+
 ## Full pipeline example
 
 See `examples/full_pipeline.py` for a complete walkthrough from raw FreeSurfer outputs to publication-quality surprise map figures.
@@ -138,7 +162,7 @@ If you use CorticalFields in your research, please cite:
 
 ```bibtex
 @software{corticalfields2026,
-  author = {Velho Mago},
+  author = {Debona, R.},
   title = {CorticalFields: Geodesic-aware GP normative modeling on cortical surfaces},
   year = {2026},
   url = {https://github.com/rdneuro/corticalfields},

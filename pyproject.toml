@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corticalfields"
-version = "0.1.1"
+version = "0.1.2"
 description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors and information-theoretic surprise maps."
 readme = "README.md"
 license = {text = "MIT"}
@@ -51,7 +51,18 @@ full = [
     "surfplot>=0.2",
     "brainspace>=0.1",
     "neuromaps>=0.0.4",
+    "torch>=2.0",
+    "cupy-cuda12x>=13.0",
 ]
+
+cuda = [
+    "cupy-cuda12x>=13.0",
+]
+
+torch-gpu = [
+    "torch>=2.0",
+]
+
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
