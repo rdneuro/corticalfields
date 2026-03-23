@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corticalfields"
-version = "0.1.0"
+version = "0.1.1"
 description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors and information-theoretic surprise maps."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
-    {name = "Velho Mago (rdneuro)", email = "rdneuro@github.com"},
+    {name = "rdneuro", email = "r.debona@ufrj.br"},
 ]
 keywords = [
     "neuroimaging", "cortical-surface", "gaussian-process",
