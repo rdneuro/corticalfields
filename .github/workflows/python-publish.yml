@@ -1,0 +1,205 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  CorticalFields — Publish to PyPI
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  This workflow builds and publishes the corticalfields package to PyPI
+#  whenever you create a new GitHub Release (e.g., v0.1.0).
+#
+#  It uses PyPI's "Trusted Publishers" (OpenID Connect) mechanism, which
+#  means NO API tokens or secrets are needed — PyPI trusts this specific
+#  GitHub repository and workflow to publish the package directly.
+#
+#  ┌─────────────────────────────────────────────────────────────────────┐
+#  │  FIRST-TIME SETUP (do this ONCE before the first publish):         │
+#  │                                                                     │
+#  │  1. Go to https://pypi.org and create an account (or log in)       │
+#  │                                                                     │
+#  │  2. Go to: https://pypi.org/manage/account/publishing/             │
+#  │                                                                     │
+#  │  3. Under "Add a new pending publisher", fill in:                  │
+#  │       PyPI project name : corticalfields                           │
+#  │       Owner             : rdneuro                                  │
+#  │       Repository        : corticalfields                           │
+#  │       Workflow name     : python-publish.yml                       │
+#  │       Environment name  : pypi                                     │
+#  │                                                                     │
+#  │  4. Click "Add". That's it — no tokens needed!                     │
+#  │                                                                     │
+#  │  For TestPyPI (optional, for testing):                             │
+#  │  5. Go to https://test.pypi.org/manage/account/publishing/        │
+#  │  6. Same fields, but environment name: testpypi                    │
+#  └─────────────────────────────────────────────────────────────────────┘
+#
+#  HOW TO PUBLISH A NEW VERSION:
+#
+#  1. Update the version in pyproject.toml:
+#       version = "0.2.0"
+#
+#  2. Commit and push:
+#       git add pyproject.toml
+#       git commit -m "Bump version to 0.2.0"
+#       git push
+#
+#  3. Create a Git tag:
+#       git tag v0.2.0
+#       git push origin v0.2.0
+#
+#  4. Go to GitHub → Releases → "Draft a new release"
+#       - Choose tag: v0.2.0
+#       - Title: "v0.2.0 — [description]"
+#       - Write release notes (or auto-generate)
+#       - Click "Publish release"
+#
+#  5. The workflow triggers automatically. Watch the Actions tab.
+#     Within ~2 minutes, the package will be live on PyPI:
+#       pip install corticalfields
+#
+#  ═══════════════════════════════════════════════════════════════════════════
+
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+  # Allow manual trigger from the Actions tab (useful for testing)
+  workflow_dispatch:
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  #  Job 1: Build the distribution (sdist + wheel)
+  # ─────────────────────────────────────────────────────────────────────
+  build:
+    name: Build distribution 📦
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      # Verify the built distributions are valid
+      - name: Check distributions
+        run: |
+          python -m pip install twine
+          twine check dist/*
+
+      # Upload the built artifacts so the publish jobs can download them
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  # ─────────────────────────────────────────────────────────────────────
+  #  Job 2: Publish to PyPI (production)
+  # ─────────────────────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI 🚀
+    needs: build
+    runs-on: ubuntu-latest
+
+    # This environment MUST match the one you configured on PyPI
+    # (step 3 in the setup instructions above)
+    environment:
+      name: pypi
+      url: https://pypi.org/p/corticalfields
+
+    # These permissions are required for Trusted Publishers (OIDC)
+    permissions:
+      id-token: write   # Needed to mint the OIDC token
+      contents: read     # Needed to read the repo
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      # This action handles the OIDC exchange with PyPI automatically.
+      # No API token or password is needed — PyPI verifies the GitHub
+      # repository, workflow, and environment via the OIDC identity token.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ─────────────────────────────────────────────────────────────────────
+  #  Job 3 (optional): Publish to TestPyPI first
+  # ─────────────────────────────────────────────────────────────────────
+  #  Uncomment this job if you want to test on TestPyPI before going
+  #  to production. You'll also need to configure a "testpypi"
+  #  environment on TestPyPI (see setup instructions above).
+  #
+  # publish-testpypi:
+  #   name: Publish to TestPyPI 🧪
+  #   needs: build
+  #   runs-on: ubuntu-latest
+  #
+  #   environment:
+  #     name: testpypi
+  #     url: https://test.pypi.org/p/corticalfields
+  #
+  #   permissions:
+  #     id-token: write
+  #     contents: read
+  #
+  #   steps:
+  #     - name: Download distributions
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: python-package-distributions
+  #         path: dist/
+  #
+  #     - name: Publish to TestPyPI
+  #       uses: pypa/gh-action-pypi-publish@release/v1
+  #       with:
+  #         repository-url: https://test.pypi.org/legacy/
+
+  # ─────────────────────────────────────────────────────────────────────
+  #  Job 4: Create GitHub Release assets
+  # ─────────────────────────────────────────────────────────────────────
+  #  Attaches the built .whl and .tar.gz files to the GitHub Release
+  #  so users can also download them directly from the release page.
+  github-release:
+    name: Attach to GitHub Release 📎
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # Needed to upload release assets
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Sign with Sigstore
+        uses: sigstore/gh-action-sigstore-python@v3.0.0
+        with:
+          inputs: >-
+            ./dist/*.tar.gz
+            ./dist/*.whl
+
+      - name: Upload to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          gh release upload
+          "${{ github.ref_name }}"
+          dist/**
+          --repo "${{ github.repository }}"
