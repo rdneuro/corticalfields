@@ -1,0 +1,12 @@
+# ds000221 normative reference cohort — subject IDs
+# These are the subjects already processed with recon-all.
+# Replace/extend with your actual processed subject IDs.
+#
+# The ds000221 dataset contains healthy adult controls scanned
+# on multiple sessions. For the normative model we use ses-01.
+#
+sub-010002
+sub-010004
+sub-010006
+sub-010008
+sub-010010
