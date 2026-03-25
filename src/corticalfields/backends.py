@@ -340,11 +340,14 @@ def _eigsh_cupy(
     """
     CuPy GPU eigsh via cuSOLVER shift-invert.
 
-    Uses the same strategy as scipy ARPACK: shift-invert with σ = −0.01
-    transforms the smallest eigenvalues into the largest, which the
-    iterative solver handles efficiently. LOBPCG (the previous impl)
-    cannot do shift-invert and fails to converge on cortical meshes
-    because the LB spectrum has tiny gaps near zero.
+    CuPy's eigsh only solves the standard problem Ax = λx, not the
+    generalised Lφ = λMφ. Since M is a diagonal lumped mass matrix
+    (guaranteed by CorticalFields Laplacian assembly), we transform:
+
+        M^{-1/2} L M^{-1/2} y = λ y,    φ = M^{-1/2} y
+
+    This is exact (no approximation) and adds negligible cost because
+    M^{-1/2} is just element-wise ops on the diagonal.
     """
     import cupy as cp
     import cupyx.scipy.sparse as csp
@@ -352,16 +355,27 @@ def _eigsh_cupy(
 
     np_dtype = np.float32 if dtype == "float32" else np.float64
 
-    L_gpu = csp.csc_matrix(L.tocsc().astype(np_dtype))
-    M_gpu = csp.csc_matrix(M.tocsc().astype(np_dtype))
+    # ── Extract M diagonal and compute M^{-1/2} ─────────────────────
+    M_diag = np.array(M.diagonal()).ravel().astype(np_dtype)
+    M_diag = np.maximum(M_diag, 1e-16)           # avoid division by zero
+    M_inv_sqrt = 1.0 / np.sqrt(M_diag)
+    D = sp.diags(M_inv_sqrt, format="csc").astype(np_dtype)
 
-    eigenvalues, eigenvectors = cupy_eigsh(
-        L_gpu, k=k, M=M_gpu,
+    # ── Transform: A = M^{-1/2} L M^{-1/2} (symmetric) ─────────────
+    A = D @ L.tocsc().astype(np_dtype) @ D
+    A_gpu = csp.csc_matrix(A)
+
+    # ── Standard eigsh with shift-invert ─────────────────────────────
+    eigenvalues, Y = cupy_eigsh(
+        A_gpu, k=k,
         sigma=-0.01, which="LM",
     )
 
+    # ── Recover original eigenvectors: φ = M^{-1/2} y ───────────────
+    eigenvectors = cp.asnumpy(Y) * M_inv_sqrt[:, None]
+
     evals = cp.asnumpy(eigenvalues).astype(np.float64)
-    evecs = cp.asnumpy(eigenvectors).astype(np.float64)
+    evecs = eigenvectors.astype(np.float64)
     order = np.argsort(evals)
     return evals[order], evecs[:, order]
 
