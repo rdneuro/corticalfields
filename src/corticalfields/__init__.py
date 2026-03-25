@@ -48,8 +48,8 @@ bayes_viz   : Publication-quality Bayesian visualization (20 functions)
 viz         : Publication-quality surface visualization
 """
 
-__version__ = "0.3.0"
-__author__ = "Velho Mago (rdneuro)"
+__version__ = "0.1.3"
+__author__ = "Debpna, R. (rdneuro)"
 
 # ── Lazy imports ────────────────────────────────────────────────────────
 # Heavy dependencies (torch, gpytorch, cupy, pymc, arviz) are only loaded
