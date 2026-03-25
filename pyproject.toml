@@ -65,7 +65,7 @@ dependencies = [
 bayesian = [
     "pymc>=5.10",
     "arviz>=0.15",
-    "preliz>=0.10",
+    "preliz==0.17",
     "pgmpy>=0.1.25",
     "bambi>=0.13",
     "pymc-extras>=0.1",
@@ -83,9 +83,15 @@ bayesian-gpu = [
     "corticalfields[bayesian]",
     "numpyro>=0.14",
     "blackjax>=1.0",
-    "jax[cuda12]>=0.4",
+    "jax[cuda13]>=0.4",
 ]
-
+bayesian-all = [
+    "corticalfields[bayesian]",
+    "nutpie>=0.9",
+    "numpyro>=0.14",
+    "blackjax>=1.0",
+    "jax[cuda13]>=0.4",
+]
 # LaPy Laplacian backend (Deep-MI group)
 lapy = [
     "lapy>=1.0",
@@ -125,8 +131,11 @@ spectral-full = [
 # Everything except GPU
 all = [
     "corticalfields[spectral-full]",
-    "corticalfields[bayesian-fast]",
+    "corticalfields[bayesian-all]",
+    "corticalfields[cuda]",
     "corticalfields[viz]",
+    "corticalfields[lapy-fast]",
+    "corticalfields[igraph]",
     "giotto-tda>=0.6",
 ]
 
