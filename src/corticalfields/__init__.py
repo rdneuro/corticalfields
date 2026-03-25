@@ -17,6 +17,14 @@ Use ``corticalfields.backends.available_backends()`` to check what's
 available on your system. All compute-intensive functions accept a
 ``backend=`` parameter.
 
+Bayesian analysis
+-----------------
+The ``bayesian`` submodule provides 10 reusable model classes for
+neuroimaging research (horseshoe, R2-D2, BEST, hierarchical, mediation,
+classification, change-point, DAG). All models support 4 sampler
+backends: pymc, nutpie, numpyro, blackjax.  The ``bayes_viz`` submodule
+provides 20 publication-quality plotting functions.
+
 Core pipeline:
     1. Load FreeSurfer surfaces and morphometric overlays
     2. Compute Laplace–Beltrami eigenpairs on the cortical mesh
@@ -35,15 +43,17 @@ normative   : GP-based normative modeling pipeline
 surprise    : Information-theoretic anomaly scoring
 features    : Morphometric feature extraction from FreeSurfer
 graphs      : Cortical similarity network construction
+bayesian    : Bayesian statistical analysis (PyMC, ArviZ, PreliZ)
+bayes_viz   : Publication-quality Bayesian visualization (20 functions)
 viz         : Publication-quality surface visualization
 """
 
-__version__ = "0.1.2"
-__author__ = "Debona, R. (rdneuro)"
+__version__ = "0.3.0"
+__author__ = "Velho Mago (rdneuro)"
 
 # ── Lazy imports ────────────────────────────────────────────────────────
-# Heavy dependencies (torch, gpytorch, cupy) are only loaded when the
-# modules that need them are first accessed. This keeps
+# Heavy dependencies (torch, gpytorch, cupy, pymc, arviz) are only loaded
+# when the modules that need them are first accessed. This keeps
 # `import corticalfields` fast and memory-light for submodule-level usage.
 
 
@@ -62,7 +72,10 @@ def __getattr__(name: str):
         "spectral_feature_matrix": ("corticalfields.spectral", "spectral_feature_matrix"),
         # backends.py (lightweight detection; GPU libs imported lazily)
         "available_backends": ("corticalfields.backends", "available_backends"),
+        "available_laplacian_backends": ("corticalfields.backends", "available_laplacian_backends"),
         "resolve_backend": ("corticalfields.backends", "resolve_backend"),
+        "compute_graph_metrics": ("corticalfields.backends", "compute_graph_metrics"),
+        "vectorized_correlation_matrix": ("corticalfields.backends", "vectorized_correlation_matrix"),
         # kernels.py (heavy — torch + gpytorch)
         "SpectralMaternKernel": ("corticalfields.kernels", "SpectralMaternKernel"),
         # normative.py (heavy — torch + gpytorch)
@@ -72,6 +85,32 @@ def __getattr__(name: str):
         "compute_surprise": ("corticalfields.surprise", "compute_surprise"),
         # features.py (lightweight)
         "MorphometricProfile": ("corticalfields.features", "MorphometricProfile"),
+        # bayesian.py (heavy — pymc + arviz; lazy-loaded)
+        "SamplerConfig": ("corticalfields.bayesian", "SamplerConfig"),
+        "FAST": ("corticalfields.bayesian", "FAST"),
+        "PUBLICATION": ("corticalfields.bayesian", "PUBLICATION"),
+        "HORSESHOE": ("corticalfields.bayesian", "HORSESHOE"),
+        "HorseshoeRegression": ("corticalfields.bayesian", "HorseshoeRegression"),
+        "R2D2Regression": ("corticalfields.bayesian", "R2D2Regression"),
+        "BayesianRidge": ("corticalfields.bayesian", "BayesianRidge"),
+        "BayesianGroupComparison": ("corticalfields.bayesian", "BayesianGroupComparison"),
+        "BayesianCorrelation": ("corticalfields.bayesian", "BayesianCorrelation"),
+        "BayesianMediation": ("corticalfields.bayesian", "BayesianMediation"),
+        "HierarchicalRegression": ("corticalfields.bayesian", "HierarchicalRegression"),
+        "BayesianLogistic": ("corticalfields.bayesian", "BayesianLogistic"),
+        "BayesianChangePoint": ("corticalfields.bayesian", "BayesianChangePoint"),
+        "BayesianDAG": ("corticalfields.bayesian", "BayesianDAG"),
+        "compute_diagnostics": ("corticalfields.bayesian", "compute_diagnostics"),
+        "model_comparison": ("corticalfields.bayesian", "model_comparison"),
+        "bayesian_r2": ("corticalfields.bayesian", "bayesian_r2"),
+        "probability_of_direction": ("corticalfields.bayesian", "probability_of_direction"),
+        "rope_percentage": ("corticalfields.bayesian", "rope_percentage"),
+        "savage_dickey_bf": ("corticalfields.bayesian", "savage_dickey_bf"),
+        "shrinkage_metrics": ("corticalfields.bayesian", "shrinkage_metrics"),
+        "to_latex_table": ("corticalfields.bayesian", "to_latex_table"),
+        "elicit_prior": ("corticalfields.bayesian", "elicit_prior"),
+        "enigma_informed_prior": ("corticalfields.bayesian", "enigma_informed_prior"),
+        "ENIGMA_EFFECT_SIZES": ("corticalfields.bayesian", "ENIGMA_EFFECT_SIZES"),
     }
     if name in _MAP:
         module_path, attr = _MAP[name]
@@ -89,11 +128,26 @@ __all__ = [
     "heat_kernel_signature", "wave_kernel_signature",
     "global_point_signature", "spectral_feature_matrix",
     # Backend management
-    "available_backends", "resolve_backend",
+    "available_backends", "available_laplacian_backends",
+    "resolve_backend", "compute_graph_metrics",
+    "vectorized_correlation_matrix",
     # GP kernels & normative modeling
     "SpectralMaternKernel", "CorticalNormativeModel",
     # Surprise maps
     "SurpriseMap", "compute_surprise",
     # Feature extraction
     "MorphometricProfile",
+    # Bayesian analysis — sampler config & presets
+    "SamplerConfig", "FAST", "PUBLICATION", "HORSESHOE",
+    # Bayesian analysis — model classes
+    "HorseshoeRegression", "R2D2Regression", "BayesianRidge",
+    "BayesianGroupComparison", "BayesianCorrelation",
+    "BayesianMediation", "HierarchicalRegression",
+    "BayesianLogistic", "BayesianChangePoint", "BayesianDAG",
+    # Bayesian analysis — diagnostics & metrics
+    "compute_diagnostics", "model_comparison", "bayesian_r2",
+    "probability_of_direction", "rope_percentage",
+    "savage_dickey_bf", "shrinkage_metrics", "to_latex_table",
+    # Bayesian analysis — prior elicitation
+    "elicit_prior", "enigma_informed_prior", "ENIGMA_EFFECT_SIZES",
 ]

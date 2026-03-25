@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corticalfields"
-version = "0.1.2"
-description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors and information-theoretic surprise maps."
+version = "0.3.0"
+description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors, Bayesian analysis, and information-theoretic surprise maps."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -16,7 +16,7 @@ keywords = [
     "neuroimaging", "cortical-surface", "gaussian-process",
     "normative-modeling", "epilepsy", "heat-kernel-signature",
     "laplace-beltrami", "surprise-maps", "spectral-analysis",
-    "bayesian-inference",
+    "bayesian-inference", "horseshoe-prior", "pymc",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -26,6 +26,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 
+# ── Core dependencies (always installed) ────────────────────────────────
+# These are required for the spectral analysis pipeline (surface I/O,
+# Laplace-Beltrami, HKS/WKS/GPS, GP kernels, normative modeling).
+# Note: pymc is NOT a core dep — it's in [bayesian] below.
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
@@ -40,29 +44,93 @@ dependencies = [
     "joblib>=1.3",
 ]
 
+# ── Optional dependency groups ──────────────────────────────────────────
+#
+# Install what you need:
+#   pip install corticalfields                    # core spectral pipeline
+#   pip install corticalfields[bayesian]          # + Bayesian analysis
+#   pip install corticalfields[bayesian-fast]     # + nutpie (fastest CPU)
+#   pip install corticalfields[bayesian-gpu]      # + numpyro/blackjax (GPU)
+#   pip install corticalfields[lapy]              # + LaPy Laplacian backend
+#   pip install corticalfields[lapy-fast]         # + LaPy with CHOLMOD
+#   pip install corticalfields[igraph]            # + fast graph metrics
+#   pip install corticalfields[cuda]              # + CuPy GPU backend
+#   pip install corticalfields[viz]               # + brain surface viz
+#   pip install corticalfields[all]               # everything (no GPU)
+#   pip install corticalfields[all,cuda]          # everything + GPU
+
 [project.optional-dependencies]
-full = [
-    "robust-laplacian>=0.2",
-    "potpourri3d>=0.0.8",
-    "geometric-kernels>=0.2",
+
+# Bayesian analysis (pymc + arviz + preliz + pgmpy)
+bayesian = [
     "pymc>=5.10",
-    "giotto-tda>=0.6",
-    "torch-geometric>=2.4",
-    "surfplot>=0.2",
-    "brainspace>=0.1",
-    "neuromaps>=0.0.4",
-    "torch>=2.0",
-    "cupy-cuda12x>=13.0",
+    "arviz>=0.15",
+    "preliz>=0.10",
+    "pgmpy>=0.1.25",
+    "bambi>=0.13",
+    "pymc-extras>=0.1",
+    "seaborn>=0.13",
 ]
 
+# Bayesian + nutpie (fastest CPU sampler, ~2x speedup)
+bayesian-fast = [
+    "corticalfields[bayesian]",
+    "nutpie>=0.9",
+]
+
+# Bayesian + JAX GPU samplers
+bayesian-gpu = [
+    "corticalfields[bayesian]",
+    "numpyro>=0.14",
+    "blackjax>=1.0",
+    "jax[cuda12]>=0.4",
+]
+
+# LaPy Laplacian backend (Deep-MI group)
+lapy = [
+    "lapy>=1.0",
+]
+
+# LaPy + CHOLMOD acceleration (requires SuiteSparse system library)
+lapy-fast = [
+    "lapy[chol]>=1.0",
+]
+
+# igraph for fast graph metrics (10-100x faster than NetworkX)
+igraph = [
+    "igraph>=0.10",
+]
+
+# CuPy GPU backend for spectral descriptors
 cuda = [
     "cupy-cuda12x>=13.0",
 ]
 
-torch-gpu = [
-    "torch>=2.0",
+# Brain surface visualization
+viz = [
+    "surfplot>=0.2",
+    "brainspace>=0.1",
+    "neuromaps>=0.0.4",
 ]
 
+# Full spectral pipeline extras (no GPU, no Bayesian)
+spectral-full = [
+    "robust-laplacian>=0.2",
+    "corticalfields[lapy-fast]",
+    "corticalfields[igraph]",
+    "potpourri3d>=0.0.8",
+    "geometric-kernels>=0.2",
+]
+
+# Everything except GPU
+all = [
+    "corticalfields[spectral-full]",
+    "corticalfields[bayesian-fast]",
+    "corticalfields[viz]",
+    "giotto-tda>=0.6",
+]
+
+# Development
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

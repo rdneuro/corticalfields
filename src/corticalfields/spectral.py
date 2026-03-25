@@ -69,22 +69,12 @@ import scipy.sparse as sp
 from corticalfields.backends import (
     ArrayBackend,
     Backend,
-    compute_cotangent_laplacian_vectorized,
+    compute_laplacian as _backends_compute_laplacian,
     eigsh_solve,
     resolve_backend,
 )
 
 logger = logging.getLogger(__name__)
-
-# Try to import robust-laplacian (preferred); fall back to our own
-# vectorized cotangent Laplacian implementation if unavailable.
-try:
-    import robust_laplacian
-    _HAS_ROBUST_LAP = True
-    logger.debug("Using robust-laplacian (Sharp & Crane, SGP 2020).")
-except ImportError:
-    _HAS_ROBUST_LAP = False
-    logger.debug("robust-laplacian not found; using vectorized cotangent Laplacian.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -130,23 +120,26 @@ def compute_laplacian(
     vertices: np.ndarray,
     faces: np.ndarray,
     use_robust: bool = True,
+    method: str = "auto",
 ) -> Tuple[sp.csc_matrix, sp.csc_matrix]:
     """
     Build the discrete Laplace–Beltrami stiffness and mass matrices.
 
-    When ``robust-laplacian`` is available and ``use_robust=True``, uses
-    the intrinsic Delaunay refinement method (Sharp & Crane 2020), which
-    is numerically stable even on poor-quality or non-manifold meshes.
-
-    Otherwise, uses a fully **vectorized** cotangent scheme that is
-    ~100× faster than the naive per-triangle loop.
+    Delegates to ``backends.compute_laplacian`` with a 3-level fallback:
+      1. robust-laplacian (intrinsic Delaunay, non-manifold safe)
+      2. LaPy (vectorized FEM cotangent, optional CHOLMOD)
+      3. built-in vectorized cotangent (pure NumPy)
 
     Parameters
     ----------
     vertices : (N, 3) float64
     faces    : (F, 3) int64
     use_robust : bool
-        Prefer robust-laplacian if installed.
+        Backward-compatible flag. If True and method="auto", prefers
+        robust-laplacian. If False, skips robust and uses lapy/builtin.
+    method : str
+        Explicit Laplacian method: ``"auto"``, ``"robust"``, ``"lapy"``,
+        or ``"builtin"``. Overrides ``use_robust`` when not ``"auto"``.
 
     Returns
     -------
@@ -155,15 +148,14 @@ def compute_laplacian(
     M : scipy.sparse.csc_matrix (N, N)
         Diagonal lumped mass matrix.
     """
-    if use_robust and _HAS_ROBUST_LAP:
-        L, M = robust_laplacian.mesh_laplacian(
-            np.asarray(vertices, dtype=np.float64),
-            np.asarray(faces, dtype=np.int64),
-        )
-        return sp.csc_matrix(L), sp.csc_matrix(M)
-
-    # Vectorized cotangent Laplacian (~100× faster than per-triangle loop)
-    return compute_cotangent_laplacian_vectorized(vertices, faces)
+    # Backward compatibility: if method is explicitly set, use it;
+    # otherwise, use_robust controls whether robust-laplacian is tried
+    if method != "auto":
+        return _backends_compute_laplacian(vertices, faces, method=method)
+    if not use_robust:
+        # Skip robust-laplacian, try lapy → builtin
+        return _backends_compute_laplacian(vertices, faces, method="lapy")
+    return _backends_compute_laplacian(vertices, faces, method="auto")
 
 
 def compute_eigenpairs(
@@ -174,6 +166,7 @@ def compute_eigenpairs(
     sigma: float = -0.01,
     backend: str = "auto",
     dtype: str = "float64",
+    laplacian_method: str = "auto",
 ) -> LaplaceBeltrami:
     """
     Compute the leading eigenpairs of the LB operator on a mesh.
@@ -189,34 +182,35 @@ def compute_eigenpairs(
     n_eigenpairs : int
         Number of eigenpairs to compute (including λ_0 = 0).
     use_robust : bool
-        Prefer robust-laplacian if available.
+        Backward-compatible flag for Laplacian assembly.
     sigma : float
         Shift-invert parameter for scipy backend. Ignored by GPU backends.
     backend : str
-        Compute backend: ``'auto'``, ``'scipy'``, ``'cupy'``, ``'torch'``.
+        Eigensolver backend: ``'auto'``, ``'scipy'``, ``'cupy'``, ``'torch'``.
     dtype : str
         Internal precision: ``'float64'`` (default) or ``'float32'``.
-        GPU backends benefit from float32 (2× less memory, often faster).
-        Output is always float64 regardless of internal precision.
+    laplacian_method : str
+        Laplacian assembly method: ``'auto'``, ``'robust'``, ``'lapy'``,
+        or ``'builtin'``. When ``'auto'``, uses the 3-level fallback chain.
 
     Returns
     -------
     LaplaceBeltrami
-        Object with stiffness, mass, eigenvalues, eigenvectors.
 
     Examples
     --------
-    >>> # CPU (default — most robust)
-    >>> lb = compute_eigenpairs(vertices, faces, n_eigenpairs=300)
+    >>> # Default: best Laplacian + scipy ARPACK (most robust)
+    >>> lb = compute_eigenpairs(vertices, faces)
 
-    >>> # GPU via CuPy (3–10× faster)
+    >>> # Explicit LaPy Laplacian + scipy eigensolver
+    >>> lb = compute_eigenpairs(vertices, faces, laplacian_method="lapy")
+
+    >>> # GPU eigensolver (CuPy LOBPCG)
     >>> lb = compute_eigenpairs(vertices, faces, backend="cupy")
 
-    >>> # GPU via CuPy, float32 (fastest, minimal precision loss)
-    >>> lb = compute_eigenpairs(vertices, faces, backend="cupy", dtype="float32")
-
-    >>> # Auto-detect best backend
-    >>> lb = compute_eigenpairs(vertices, faces, backend="auto")
+    >>> # LaPy Laplacian + GPU descriptors (mix-and-match)
+    >>> lb = compute_eigenpairs(vertices, faces, laplacian_method="lapy")
+    >>> features = spectral_feature_matrix(lb, backend="cupy")
 
     Notes
     -----
@@ -233,7 +227,11 @@ def compute_eigenpairs(
     )
 
     # Step 1: Build Laplacian (always on CPU — fast, ~100ms)
-    L, M = compute_laplacian(vertices, faces, use_robust=use_robust)
+    # Uses the 3-level fallback: robust → lapy → builtin
+    L, M = compute_laplacian(
+        vertices, faces,
+        use_robust=use_robust, method=laplacian_method,
+    )
 
     # Step 2: Solve eigenvalue problem (dispatched to backend)
     eigenvalues, eigenvectors = eigsh_solve(

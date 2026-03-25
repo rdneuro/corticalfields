@@ -1,57 +1,43 @@
 """
 Compute backends for CorticalFields.
 
-This module provides a clean abstraction layer for GPU-accelerated
-computation, supporting three backends:
+This module provides:
 
-    1. **scipy** (default) — CPU-only, uses ARPACK shift-invert via
-       ``scipy.sparse.linalg.eigsh``. Most robust and numerically
-       stable. Recommended for production use and validation.
+  1. **Laplacian assembly backends** — Three options in fallback order:
+       • robust-laplacian (Sharp & Crane, SGP 2020) — intrinsic Delaunay
+       • lapy (Deep-MI / Reuter lab) — vectorized FEM cotangent + CHOLMOD
+       • built-in vectorized cotangent — pure NumPy, no extra deps
 
-    2. **cupy** — GPU-accelerated via NVIDIA CUDA. Uses CuPy's
-       LOBPCG eigensolver for the generalized eigenvalue problem
-       and CuPy arrays for descriptor computation (GEMM on GPU).
-       Requires ``cupy-cuda12x`` (or appropriate CUDA version).
-       Expected speedup: 3–10× for eigensolver, 10–30× for
-       spectral descriptors.
+  2. **Eigensolver backends** — Three options:
+       • scipy  (default) — ARPACK shift-invert, gold standard
+       • cupy   — GPU LOBPCG via CuPy
+       • torch  — GPU LOBPCG via PyTorch
 
-    3. **torch** — GPU-accelerated via PyTorch's ``torch.lobpcg``.
-       Useful when PyTorch is already in the environment (e.g., for
-       the normative GP model). Supports CUDA and MPS backends.
-       Note: ``torch.lobpcg`` has known numerical issues for some
-       problems — validate against scipy results.
+  3. **Dense array backends** — For spectral descriptor computation:
+       • numpy  (default)
+       • cupy   — GPU GEMM via cuBLAS
+       • torch  — GPU GEMM via PyTorch
 
-Backend selection follows the principle of **per-function dispatch**:
-each function accepts a ``backend=`` parameter that defaults to
-``"auto"`` (which selects the best available backend). This allows
-mixing backends freely — e.g., CPU eigensolver with GPU descriptors.
+  4. **Graph analysis backends** — For MSN/SSN graph metrics:
+       • igraph   (recommended, 10-100× faster than NetworkX)
+       • networkx (fallback)
 
 Design principles
 -----------------
-- **Zero mandatory GPU dependencies**: ``pip install corticalfields``
-  works on CPU-only machines. GPU backends are optional extras.
-- **Graceful fallback**: If a requested backend is unavailable, the
-  function logs a warning and falls back to scipy.
-- **Numerical consistency**: Results from all backends should agree
-  to within floating-point tolerance. The test suite validates this.
-- **Lazy imports**: Heavy libraries (cupy, torch) are imported only
-  when their backend is first requested.
-
-Memory budget (float64, 150K vertices, 300 eigenpairs)
-------------------------------------------------------
-- Sparse matrix (CSR): ~12 MB
-- LOBPCG workspace: ~2.2 GB
-- Eigenvectors output: ~360 MB
-- Total GPU memory: ~2.7 GB (fits on any 8+ GB GPU)
-- float32 mode halves all of the above
+- **Per-function dispatch**: each function accepts a ``backend=``
+  parameter. This allows CPU eigensolver + GPU descriptors.
+- **Zero mandatory GPU deps**: ``pip install corticalfields`` works
+  on CPU-only machines. GPU/igraph/lapy are optional.
+- **Graceful fallback**: Unavailable backends → warning + fallback.
+- **Lazy imports**: Heavy libraries loaded only when first requested.
 
 References
 ----------
-[1] A. V. Knyazev, "Toward the Optimal Preconditioned Eigensolver:
-    Locally Optimal Block Preconditioned Conjugate Gradient Method",
-    SIAM J. Sci. Comput., 2001. (LOBPCG algorithm)
-[2] CuPy documentation: cupyx.scipy.sparse.linalg.lobpcg
-[3] PyTorch documentation: torch.lobpcg
+[1] Sharp & Crane, "A Laplacian for Nonmanifold Triangle Meshes",
+    SGP 2020.
+[2] Reuter et al., LaPy — FEM on Triangle Meshes, Deep-MI group.
+[3] Knyazev, "Toward the Optimal Preconditioned Eigensolver: LOBPCG",
+    SIAM J. Sci. Comput., 2001.
 """
 
 from __future__ import annotations
@@ -59,7 +45,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
@@ -69,7 +55,43 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Backend detection
+#  Laplacian backend detection
+# ═══════════════════════════════════════════════════════════════════════════
+
+_laplacian_status: Dict[str, bool] = {}
+
+
+def _check_robust_laplacian() -> bool:
+    if "robust" not in _laplacian_status:
+        try:
+            import robust_laplacian
+            _laplacian_status["robust"] = True
+        except ImportError:
+            _laplacian_status["robust"] = False
+    return _laplacian_status["robust"]
+
+
+def _check_lapy() -> bool:
+    if "lapy" not in _laplacian_status:
+        try:
+            from lapy import TriaMesh, Solver
+            _laplacian_status["lapy"] = True
+        except ImportError:
+            _laplacian_status["lapy"] = False
+    return _laplacian_status["lapy"]
+
+
+def available_laplacian_backends() -> Dict[str, bool]:
+    """Report which Laplacian assembly backends are available."""
+    return {
+        "robust-laplacian": _check_robust_laplacian(),
+        "lapy": _check_lapy(),
+        "builtin": True,  # always available (pure NumPy)
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Eigensolver backend detection
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -80,39 +102,26 @@ class Backend(Enum):
     TORCH = "torch"
 
 
-# Lazy availability flags — checked once on first access
-_backend_status = {}
+_backend_status: Dict[str, bool] = {}
 
 
 def _check_cupy() -> bool:
-    """Check if CuPy is installed with a working CUDA device."""
     if "cupy" not in _backend_status:
         try:
             import cupy
             cupy.cuda.Device(0).compute_capability
             _backend_status["cupy"] = True
-            logger.debug(
-                "CuPy available: CUDA device %s (%.1f GB)",
-                cupy.cuda.runtime.getDeviceProperties(0)["name"].decode(),
-                cupy.cuda.Device(0).mem_info[1] / (1024 ** 3),
-            )
+            logger.debug("CuPy CUDA available.")
         except Exception:
             _backend_status["cupy"] = False
     return _backend_status["cupy"]
 
 
 def _check_torch_cuda() -> bool:
-    """Check if PyTorch is installed with CUDA support."""
     if "torch" not in _backend_status:
         try:
             import torch
             _backend_status["torch"] = torch.cuda.is_available()
-            if _backend_status["torch"]:
-                logger.debug(
-                    "PyTorch CUDA available: %s (%.1f GB)",
-                    torch.cuda.get_device_name(0),
-                    torch.cuda.get_device_properties(0).total_memory / (1024 ** 3),
-                )
         except ImportError:
             _backend_status["torch"] = False
     return _backend_status["torch"]
@@ -120,24 +129,10 @@ def _check_torch_cuda() -> bool:
 
 def resolve_backend(requested: str = "auto") -> Backend:
     """
-    Resolve the requested backend string to a Backend enum.
+    Resolve backend string to Backend enum.
 
-    Parameters
-    ----------
-    requested : str
-        One of ``"auto"``, ``"scipy"``, ``"cupy"``, ``"torch"``.
-        ``"auto"`` selects the best available backend in order:
-        cupy → torch → scipy.
-
-    Returns
-    -------
-    Backend
-        The resolved backend.
-
-    Notes
-    -----
-    If the requested backend is unavailable, falls back to scipy
-    with a warning (never raises an error for backend unavailability).
+    ``"auto"`` selects: cupy → torch → scipy.
+    Falls back to scipy if the requested backend is unavailable.
     """
     requested = requested.lower().strip()
 
@@ -151,45 +146,131 @@ def resolve_backend(requested: str = "auto") -> Backend:
     if requested == "cupy":
         if _check_cupy():
             return Backend.CUPY
-        logger.warning(
-            "CuPy backend requested but not available "
-            "(install cupy-cuda12x). Falling back to scipy."
-        )
+        logger.warning("CuPy unavailable. Falling back to scipy.")
         return Backend.SCIPY
 
     if requested == "torch":
         if _check_torch_cuda():
             return Backend.TORCH
-        logger.warning(
-            "PyTorch CUDA backend requested but not available. "
-            "Falling back to scipy."
-        )
+        logger.warning("PyTorch CUDA unavailable. Falling back to scipy.")
         return Backend.SCIPY
 
     if requested == "scipy":
         return Backend.SCIPY
 
-    raise ValueError(
-        f"Unknown backend: {requested!r}. "
-        f"Choose from: 'auto', 'scipy', 'cupy', 'torch'."
-    )
+    raise ValueError(f"Unknown backend: {requested!r}")
 
 
-def available_backends() -> dict:
+def available_backends() -> Dict[str, bool]:
+    """Report which compute backends are available."""
+    return {
+        "scipy": True,
+        "cupy": _check_cupy(),
+        "torch": _check_torch_cuda(),
+        **{f"laplacian_{k}": v for k, v in available_laplacian_backends().items()},
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Laplacian assembly — 3-level fallback chain
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def compute_laplacian(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    method: str = "auto",
+    use_cholmod: bool = True,
+) -> Tuple[sp.csc_matrix, sp.csc_matrix]:
     """
-    Report which backends are available.
+    Build the Laplace-Beltrami stiffness and mass matrices.
+
+    Fallback chain (when method="auto"):
+      1. robust-laplacian — intrinsic Delaunay, handles non-manifold
+      2. lapy — vectorized FEM cotangent, optional CHOLMOD
+      3. builtin — pure NumPy vectorized cotangent
+
+    Parameters
+    ----------
+    vertices : (N, 3) float64
+    faces : (F, 3) int64
+    method : str
+        ``"auto"``, ``"robust"``, ``"lapy"``, or ``"builtin"``.
+    use_cholmod : bool
+        Use CHOLMOD acceleration in LaPy (requires scikit-sparse).
 
     Returns
     -------
-    dict
-        Mapping from backend name to availability bool.
-        Example: ``{'scipy': True, 'cupy': True, 'torch': False}``
+    L : scipy.sparse.csc_matrix (N, N) — stiffness matrix
+    M : scipy.sparse.csc_matrix (N, N) — mass matrix (diagonal lumped)
     """
-    return {
-        "scipy": True,  # always available
-        "cupy": _check_cupy(),
-        "torch": _check_torch_cuda(),
-    }
+    method = method.lower().strip()
+
+    if method == "auto":
+        if _check_robust_laplacian():
+            method = "robust"
+        elif _check_lapy():
+            method = "lapy"
+        else:
+            method = "builtin"
+
+    if method == "robust":
+        if not _check_robust_laplacian():
+            logger.warning("robust-laplacian not available; falling back.")
+            return compute_laplacian(vertices, faces, method="lapy",
+                                     use_cholmod=use_cholmod)
+        import robust_laplacian
+        logger.debug("Laplacian assembly: robust-laplacian (intrinsic Delaunay)")
+        L, M = robust_laplacian.mesh_laplacian(
+            np.asarray(vertices, dtype=np.float64),
+            np.asarray(faces, dtype=np.int64),
+        )
+        return sp.csc_matrix(L), sp.csc_matrix(M)
+
+    if method == "lapy":
+        if not _check_lapy():
+            logger.warning("LaPy not available; falling back to builtin.")
+            return compute_laplacian(vertices, faces, method="builtin")
+        logger.debug("Laplacian assembly: LaPy (FEM cotangent)")
+        return _laplacian_lapy(vertices, faces, use_cholmod=use_cholmod)
+
+    if method == "builtin":
+        logger.debug("Laplacian assembly: builtin vectorized cotangent")
+        return compute_cotangent_laplacian_vectorized(vertices, faces)
+
+    raise ValueError(f"Unknown Laplacian method: {method!r}")
+
+
+def _laplacian_lapy(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    use_cholmod: bool = True,
+) -> Tuple[sp.csc_matrix, sp.csc_matrix]:
+    """
+    Laplacian assembly via LaPy (Deep-MI / Reuter lab).
+
+    LaPy uses a vectorized FEM cotangent scheme internally. With
+    ``use_cholmod=True`` and scikit-sparse installed, the Solver
+    uses CHOLMOD Cholesky factorization, which significantly
+    accelerates the shift-invert step in eigsh.
+
+    The mass matrix is returned in lumped (diagonal) form to match
+    the convention used by the rest of CorticalFields.
+    """
+    from lapy import TriaMesh, Solver
+
+    mesh = TriaMesh(
+        np.asarray(vertices, dtype=np.float64),
+        np.asarray(faces, dtype=np.int32),
+    )
+
+    # lump=True → diagonal mass matrix (consistent with CF convention)
+    fem = Solver(mesh, lump=True, use_cholmod=use_cholmod)
+
+    L = sp.csc_matrix(fem.stiffness)
+    M = sp.csc_matrix(fem.mass)
+
+    return L, M
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -208,62 +289,23 @@ def eigsh_solve(
     dtype: str = "float64",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Solve the generalized eigenvalue problem L φ = λ M φ for the
-    smallest k eigenvalues, dispatching to the appropriate backend.
+    Solve L phi = lambda M phi for the smallest k eigenvalues.
 
-    This is the primary computational bottleneck in CorticalFields.
-    On a 150K-vertex cortical mesh with k=300:
-      - scipy (CPU):  30–120 seconds (ARPACK shift-invert)
-      - cupy (GPU):   5–30 seconds  (LOBPCG)
-      - torch (GPU):  10–40 seconds (LOBPCG)
-
-    Parameters
-    ----------
-    L : scipy.sparse matrix, shape (N, N)
-        Stiffness (cotangent) matrix. Symmetric positive semi-definite.
-    M : scipy.sparse matrix, shape (N, N)
-        Lumped mass (area) matrix. Symmetric positive definite diagonal.
-    k : int
-        Number of eigenpairs to compute.
-    backend : str
-        Backend to use: ``'auto'``, ``'scipy'``, ``'cupy'``, ``'torch'``.
-    sigma : float
-        Shift parameter for scipy's ARPACK shift-invert. Ignored by
-        LOBPCG backends (which target smallest eigenvalues directly).
-    tol : float
-        Convergence tolerance for the eigensolver.
-    maxiter : int
-        Maximum iterations (for LOBPCG backends).
-    dtype : str
-        ``'float64'`` or ``'float32'``. GPU backends benefit
-        significantly from float32 (2× memory reduction, often 2×
-        faster SpMM). The eigenpairs are always returned as float64
-        numpy arrays regardless of internal precision.
+    Performance (150K vertices, k=300):
+      scipy (CPU, ARPACK):  30-120s  <-- RECOMMENDED
+      cupy  (GPU, LOBPCG):  5-30s    (convergence less reliable)
+      torch (GPU, LOBPCG):  10-40s   (known numerical issues)
 
     Returns
     -------
-    eigenvalues : np.ndarray, shape (k,)
-        Sorted smallest eigenvalues (ascending).
-    eigenvectors : np.ndarray, shape (N, k)
-        Corresponding eigenvectors (columns).
-
-    Notes
-    -----
-    All backends return numpy arrays on CPU. The GPU→CPU transfer
-    is handled internally (~16 ms for 360 MB on PCIe 4.0).
-
-    The LOBPCG backends solve the problem directly for smallest
-    eigenvalues (``largest=False``), avoiding the sparse factorization
-    required by shift-invert. This is more GPU-friendly because the
-    core operation is sparse matrix–block vector multiplication (SpMM),
-    which maps well to GPU SIMT architecture.
+    eigenvalues : (k,) float64 — sorted ascending
+    eigenvectors : (N, k) float64
     """
     resolved = resolve_backend(backend)
-    N = L.shape[0]
 
     logger.info(
-        "Eigensolver: %s backend, N=%d, k=%d, dtype=%s",
-        resolved.value, N, k, dtype,
+        "Eigensolver: %s, N=%d, k=%d, dtype=%s",
+        resolved.value, L.shape[0], k, dtype,
     )
 
     if resolved == Backend.CUPY:
@@ -274,51 +316,28 @@ def eigsh_solve(
         return _eigsh_scipy(L, M, k, sigma, tol)
 
 
-# ── SciPy backend (CPU, ARPACK shift-invert) ───────────────────────────
-
 def _eigsh_scipy(
     L: sp.spmatrix, M: sp.spmatrix,
     k: int, sigma: float, tol: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    SciPy ARPACK eigensolver with shift-invert mode.
-
-    This is the most numerically robust backend. Shift-invert mode
-    transforms the problem to (L - σM)⁻¹ M φ = θ φ, which clusters
-    eigenvalues near σ and makes ARPACK converge rapidly for the
-    smallest eigenvalues of L.
-    """
+    """SciPy ARPACK shift-invert — most robust, recommended."""
     L_csc = sp.csc_matrix(L, dtype=np.float64)
     M_csc = sp.csc_matrix(M, dtype=np.float64)
 
     eigenvalues, eigenvectors = scipy_eigsh(
         L_csc, k=k, M=M_csc,
-        sigma=sigma, which="LM",
-        tol=tol,
+        sigma=sigma, which="LM", tol=tol,
     )
-
-    # Sort by eigenvalue (ascending)
     order = np.argsort(eigenvalues)
-    return eigenvalues[order].astype(np.float64), eigenvectors[:, order].astype(np.float64)
+    return eigenvalues[order].astype(np.float64), \
+           eigenvectors[:, order].astype(np.float64)
 
-
-# ── CuPy backend (GPU, LOBPCG) ─────────────────────────────────────────
 
 def _eigsh_cupy(
     L: sp.spmatrix, M: sp.spmatrix,
     k: int, tol: float, maxiter: int, dtype: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    CuPy LOBPCG eigensolver on GPU.
-
-    LOBPCG (Locally Optimal Block Preconditioned Conjugate Gradient)
-    directly targets the smallest eigenvalues without shift-invert,
-    making it GPU-friendly: the core operation is SpMM (sparse
-    matrix × block vector), which runs at near-peak GPU bandwidth.
-
-    The generalized problem L φ = λ M φ is handled natively via
-    the ``B=`` parameter.
-    """
+    """CuPy GPU LOBPCG — faster but less reliable than ARPACK."""
     import cupy as cp
     import cupyx.scipy.sparse as csp
     from cupyx.scipy.sparse.linalg import lobpcg
@@ -326,159 +345,95 @@ def _eigsh_cupy(
     np_dtype = np.float32 if dtype == "float32" else np.float64
     cp_dtype = cp.float32 if dtype == "float32" else cp.float64
 
-    # Transfer sparse matrices to GPU (CSR format for efficient SpMV)
     L_gpu = csp.csr_matrix(L.tocsr().astype(np_dtype))
     M_gpu = csp.csr_matrix(M.tocsr().astype(np_dtype))
 
-    N = L.shape[0]
-
-    # Random initial block vector (orthogonalized internally by LOBPCG)
-    # Using a fixed seed for reproducibility across runs
     rng = cp.random.RandomState(seed=42)
-    X0 = rng.randn(N, k, dtype=cp_dtype)
-
-    logger.info("  CuPy LOBPCG: transferring to GPU...")
-
-    # Diagonal preconditioner: M⁻¹ (accelerates convergence)
-    # Since M is diagonal (lumped mass), this is trivially efficient
-    M_diag = cp.array(M.diagonal().astype(np_dtype))
-    M_diag[M_diag < 1e-16] = 1e-16
-    M_inv_diag = 1.0 / M_diag
-
-    def preconditioner(x):
-        return M_inv_diag[:, None] * x
-
-    logger.info("  CuPy LOBPCG: solving (k=%d, maxiter=%d)...", k, maxiter)
+    X0 = rng.randn(L.shape[0], k, dtype=cp_dtype)
 
     eigenvalues, eigenvectors = lobpcg(
-        L_gpu, X0,
-        B=M_gpu,
-        largest=False,
-        tol=tol,
-        maxiter=maxiter,
+        L_gpu, X0, B=M_gpu,
+        largest=False, tol=tol, maxiter=maxiter,
     )
 
-    # Transfer back to CPU and ensure float64 + sorted
     evals = cp.asnumpy(eigenvalues).astype(np.float64)
     evecs = cp.asnumpy(eigenvectors).astype(np.float64)
-
     order = np.argsort(evals)
     return evals[order], evecs[:, order]
 
-
-# ── PyTorch backend (GPU, LOBPCG) ──────────────────────────────────────
 
 def _eigsh_torch(
     L: sp.spmatrix, M: sp.spmatrix,
     k: int, tol: float, maxiter: int, dtype: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    PyTorch LOBPCG eigensolver on CUDA.
-
-    Uses ``torch.lobpcg`` with the generalized form ``A x = λ B x``.
-    Particularly useful when the downstream pipeline (normative
-    modeling, SpectralMaternKernel) already uses PyTorch — the
-    eigenvectors can be kept on GPU as torch.Tensors, avoiding a
-    round-trip through numpy.
-
-    Caveat: ``torch.lobpcg`` has known numerical issues for some
-    matrix types (see PyTorch GitHub #101075). Always validate
-    against scipy results on a test mesh before using in production.
-    """
+    """PyTorch GPU LOBPCG — caution: known numerical issues (#101075)."""
     import torch
 
     torch_dtype = torch.float32 if dtype == "float32" else torch.float64
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Convert scipy sparse → torch sparse CSR
-    L_csr = L.tocsr()
-    M_csr = M.tocsr()
-
-    def _scipy_to_torch_csr(mat, dtype, device):
+    def _to_torch_csr(mat, dt, dev):
+        m = mat.tocsr()
         return torch.sparse_csr_tensor(
-            torch.tensor(mat.indptr, dtype=torch.int64, device=device),
-            torch.tensor(mat.indices, dtype=torch.int64, device=device),
-            torch.tensor(mat.data, dtype=dtype, device=device),
-            size=mat.shape,
+            torch.tensor(m.indptr, dtype=torch.int64, device=dev),
+            torch.tensor(m.indices, dtype=torch.int64, device=dev),
+            torch.tensor(m.data, dtype=dt, device=dev),
+            size=m.shape,
         )
 
-    L_t = _scipy_to_torch_csr(L_csr, torch_dtype, device)
-    M_t = _scipy_to_torch_csr(M_csr, torch_dtype, device)
+    L_t = _to_torch_csr(L, torch_dtype, device)
+    M_t = _to_torch_csr(M, torch_dtype, device)
 
-    N = L.shape[0]
-
-    # Random initial vectors
     torch.manual_seed(42)
-    X0 = torch.randn(N, k, dtype=torch_dtype, device=device)
+    X0 = torch.randn(L.shape[0], k, dtype=torch_dtype, device=device)
 
-    logger.info("  torch LOBPCG: solving on %s (k=%d)...", device, k)
-
-    # torch.lobpcg returns (eigenvalues, eigenvectors)
-    # largest=False targets smallest eigenvalues
     eigenvalues, eigenvectors = torch.lobpcg(
-        A=L_t,
-        k=k,
-        B=M_t,
-        X=X0,
-        largest=False,
-        niter=maxiter,
-        tol=tol,
+        A=L_t, k=k, B=M_t, X=X0,
+        largest=False, niter=maxiter, tol=tol,
     )
 
-    # Transfer to CPU numpy
     evals = eigenvalues.cpu().numpy().astype(np.float64)
     evecs = eigenvectors.cpu().numpy().astype(np.float64)
-
     order = np.argsort(evals)
     return evals[order], evecs[:, order]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  GPU-accelerated dense operations (descriptors)
+#  Dense array backend (for spectral descriptors)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 @dataclass
 class ArrayBackend:
     """
-    Thin wrapper providing array operations on the resolved backend.
-
-    This class abstracts numpy/cupy/torch differences for the dense
-    matrix operations used in spectral descriptor computation (HKS,
-    WKS, GPS). All operations are element-wise or GEMM, which map
-    trivially to GPU.
+    Thin wrapper abstracting numpy/cupy/torch for dense GEMM ops
+    used in spectral descriptor computation (HKS, WKS, GPS).
 
     Usage
     -----
-    >>> ab = ArrayBackend.create("cupy")  # or "auto", "torch", "scipy"
-    >>> phi_sq = ab.square(eigenvectors)  # runs on GPU if cupy/torch
-    >>> hks = ab.matmul(phi_sq, weights)  # GPU GEMM
-    >>> result = ab.to_numpy(hks)         # back to CPU numpy
+    >>> ab = ArrayBackend.create("cupy")
+    >>> phi_sq = ab.square(eigenvectors)   # GPU
+    >>> hks = ab.matmul(phi_sq, weights)   # cuBLAS GEMM
+    >>> result = ab.to_numpy(hks)          # back to CPU
     """
     name: str
-    xp: object      # numpy, cupy, or torch-as-numpy-like
+    xp: object
     _is_torch: bool = False
 
     @staticmethod
     def create(backend: str = "auto") -> "ArrayBackend":
-        """Create an ArrayBackend from a backend string."""
         resolved = resolve_backend(backend)
-
         if resolved == Backend.CUPY:
             import cupy as cp
             return ArrayBackend(name="cupy", xp=cp)
-
         if resolved == Backend.TORCH:
-            # For dense operations, we use torch tensors directly
             return ArrayBackend(name="torch", xp=None, _is_torch=True)
-
         return ArrayBackend(name="numpy", xp=np)
 
     def asarray(self, x: np.ndarray, dtype=None) -> object:
-        """Convert numpy array to backend array."""
         if self._is_torch:
             import torch
-            t = torch.from_numpy(x)
+            t = torch.from_numpy(np.ascontiguousarray(x))
             if dtype == "float32":
                 t = t.float()
             if torch.cuda.is_available():
@@ -488,73 +443,37 @@ class ArrayBackend:
             return self.xp.asarray(x, dtype=getattr(self.xp, dtype, None) or dtype)
         return self.xp.asarray(x)
 
-    def square(self, x) -> object:
-        """Element-wise square."""
-        if self._is_torch:
-            return x ** 2
+    def square(self, x):
         return x ** 2
 
-    def exp(self, x) -> object:
-        """Element-wise exponential."""
+    def exp(self, x):
         if self._is_torch:
             import torch
             return torch.exp(x)
         return self.xp.exp(x)
 
-    def log(self, x) -> object:
-        """Element-wise log."""
+    def log(self, x):
         if self._is_torch:
             import torch
             return torch.log(x)
         return self.xp.log(x)
 
-    def sqrt(self, x) -> object:
-        """Element-wise sqrt."""
+    def sqrt(self, x):
         if self._is_torch:
             import torch
             return torch.sqrt(x)
         return self.xp.sqrt(x)
 
-    def maximum(self, x, val) -> object:
-        """Element-wise maximum with scalar."""
+    def maximum(self, x, val):
         if self._is_torch:
             import torch
             return torch.clamp(x, min=val)
         return self.xp.maximum(x, val)
 
-    def matmul(self, a, b) -> object:
-        """Matrix multiplication (GEMM)."""
-        if self._is_torch:
-            return a @ b
+    def matmul(self, a, b):
         return a @ b
 
-    def logspace(self, start, stop, num) -> object:
-        """Logspace."""
-        if self._is_torch:
-            import torch
-            return torch.logspace(
-                start, stop, num,
-                dtype=torch.float64,
-                device=next(iter([]))  # handled by caller
-            )
-        return self.xp.logspace(start, stop, num)
-
-    def linspace(self, start, stop, num) -> object:
-        """Linspace."""
-        if self._is_torch:
-            import torch
-            return torch.linspace(start, stop, num)
-        return self.xp.linspace(start, stop, num)
-
-    def hstack(self, arrays) -> object:
-        """Horizontal stack."""
-        if self._is_torch:
-            import torch
-            return torch.cat(arrays, dim=1)
-        return self.xp.hstack(arrays)
-
     def to_numpy(self, x) -> np.ndarray:
-        """Convert backend array back to numpy."""
         if self._is_torch:
             return x.detach().cpu().numpy()
         if self.name == "cupy":
@@ -564,7 +483,7 @@ class ArrayBackend:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Vectorized cotangent Laplacian (CPU, ~100× faster than loop)
+#  Vectorized cotangent Laplacian (builtin, ~100x faster than loop)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -573,58 +492,25 @@ def compute_cotangent_laplacian_vectorized(
     faces: np.ndarray,
 ) -> Tuple[sp.csc_matrix, sp.csc_matrix]:
     """
-    Vectorized cotangent Laplacian assembly.
+    Fully vectorized cotangent Laplacian — pure NumPy, no extra deps.
 
-    This replaces the per-triangle Python loop in the original
-    ``compute_laplacian`` with fully vectorized NumPy operations,
-    yielding ~100× speedup on typical FreeSurfer meshes (~300K faces).
-
-    The algorithm computes cotangent weights for all triangles
-    simultaneously using the identity:
-        cot(angle at vertex k, opposite edge i-j) =
-            dot(e_ki, e_kj) / |cross(e_ki, e_kj)|
-
-    Parameters
-    ----------
-    vertices : (N, 3) float64
-    faces : (F, 3) int64
-
-    Returns
-    -------
-    L : scipy.sparse.csc_matrix (N, N)
-        Cotangent stiffness matrix.
-    M : scipy.sparse.csc_matrix (N, N)
-        Diagonal lumped mass matrix.
+    ~100x faster than the per-triangle Python loop. Used as the final
+    fallback when neither robust-laplacian nor LaPy is installed.
     """
     N = vertices.shape[0]
-    F = faces.shape[0]
     v = vertices.astype(np.float64)
     f = faces.astype(np.int64)
 
-    # Vertex positions for each triangle corner
     v0, v1, v2 = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    e01, e02, e12 = v1 - v0, v2 - v0, v2 - v1
 
-    # Edge vectors
-    e01 = v1 - v0  # (F, 3)
-    e02 = v2 - v0
-    e12 = v2 - v1
+    cross_012 = np.cross(e01, e02)
+    double_areas = np.maximum(np.linalg.norm(cross_012, axis=1), 1e-16)
 
-    # Cross products and their norms (= 2 × triangle area)
-    cross_012 = np.cross(e01, e02)  # (F, 3)
-    double_areas = np.linalg.norm(cross_012, axis=1)  # (F,)
-    double_areas = np.maximum(double_areas, 1e-16)  # avoid division by zero
+    cot0 = np.sum(e01 * e02, axis=1) / double_areas
+    cot1 = np.sum(-e01 * e12, axis=1) / double_areas
+    cot2 = np.sum(-e02 * (-e12), axis=1) / double_areas
 
-    # Cotangent weights:
-    # cot(angle at v0) = dot(e01, e02) / |cross(e01, e02)| → weight for edge (v1, v2)
-    # cot(angle at v1) = dot(-e01, e12) / |cross(-e01, e12)| → weight for edge (v0, v2)
-    # cot(angle at v2) = dot(-e02, -e12) / |cross(-e02, -e12)| → weight for edge (v0, v1)
-    cot0 = np.sum(e01 * e02, axis=1) / double_areas  # (F,)
-    cot1 = np.sum(-e01 * e12, axis=1) / double_areas  # (F,)
-    cot2 = np.sum(-e02 * (-e12), axis=1) / double_areas  # (F,)
-
-    # Assemble sparse stiffness matrix
-    # For each triangle, 3 edges contribute to off-diagonal entries
-    # Edge (v1,v2) with weight -0.5 * cot0, etc.
     i_idx = np.concatenate([f[:, 1], f[:, 2], f[:, 0], f[:, 2], f[:, 0], f[:, 1]])
     j_idx = np.concatenate([f[:, 2], f[:, 1], f[:, 2], f[:, 0], f[:, 1], f[:, 0]])
     w_val = np.concatenate([
@@ -634,12 +520,10 @@ def compute_cotangent_laplacian_vectorized(
     ])
 
     L = sp.coo_matrix((w_val, (i_idx, j_idx)), shape=(N, N)).tocsc()
-    # Set diagonal = -sum of off-diagonal (ensures row-sum = 0)
     diag = -np.array(L.sum(axis=1)).ravel()
     L = L + sp.diags(diag, format="csc")
 
-    # Lumped mass matrix: each vertex gets 1/3 of the area of its adjacent triangles
-    tri_areas = double_areas / 2.0  # (F,)
+    tri_areas = double_areas / 2.0
     areas = np.zeros(N, dtype=np.float64)
     np.add.at(areas, f[:, 0], tri_areas / 3.0)
     np.add.at(areas, f[:, 1], tri_areas / 3.0)
@@ -648,3 +532,193 @@ def compute_cotangent_laplacian_vectorized(
     M = sp.diags(areas, format="csc")
 
     return L, M
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Vectorized MSN/SSN construction (replaces scipy pearsonr loop)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def vectorized_correlation_matrix(
+    profiles: np.ndarray,
+    method: str = "pearson",
+    fisher_z: bool = True,
+) -> np.ndarray:
+    """
+    Vectorized inter-ROI correlation matrix.
+
+    Replaces the O(R^2) loop over ``scipy.stats.pearsonr`` calls with
+    a single ``np.corrcoef`` call (~100x faster for R=200).
+
+    Parameters
+    ----------
+    profiles : (R, F) array — mean feature profile per ROI
+    method : 'pearson' or 'spearman'
+    fisher_z : bool — apply Fisher z-transform
+
+    Returns
+    -------
+    corr : (R, R) symmetric correlation matrix
+    """
+    if method == "spearman":
+        from scipy.stats import rankdata
+        profiles = np.apply_along_axis(rankdata, 1, profiles)
+
+    corr = np.corrcoef(profiles)
+    np.fill_diagonal(corr, 0.0)
+
+    if fisher_z:
+        corr = np.arctanh(np.clip(corr, -0.9999, 0.9999))
+        np.fill_diagonal(corr, 0.0)
+
+    return corr
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Graph metrics — igraph (fast) -> networkx (fallback)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _check_igraph() -> bool:
+    if "igraph" not in _backend_status:
+        try:
+            import igraph
+            _backend_status["igraph"] = True
+        except ImportError:
+            _backend_status["igraph"] = False
+    return _backend_status["igraph"]
+
+
+def compute_graph_metrics(
+    adjacency: np.ndarray,
+    threshold: Optional[float] = None,
+    density: Optional[float] = None,
+    backend: str = "auto",
+) -> Dict[str, object]:
+    """
+    Graph metrics from a similarity matrix.
+
+    Uses igraph (10-100x faster) when available, falls back to NetworkX.
+
+    Parameters
+    ----------
+    adjacency : (R, R) symmetric weight matrix
+    threshold : float — hard threshold on edge weights
+    density : float — target density (overrides threshold)
+    backend : 'auto', 'igraph', or 'networkx'
+
+    Returns
+    -------
+    dict with: degree, clustering, efficiency, betweenness,
+               modularity, strength, assortativity
+    """
+    W = adjacency.copy()
+
+    if density is not None:
+        flat = np.sort(W[np.triu_indices_from(W, k=1)])[::-1]
+        n_edges = int(density * len(flat))
+        if 0 < n_edges <= len(flat):
+            threshold = flat[n_edges - 1]
+
+    if threshold is not None:
+        W[W < threshold] = 0.0
+
+    if backend == "auto":
+        backend = "igraph" if _check_igraph() else "networkx"
+
+    if backend == "igraph" and _check_igraph():
+        return _graph_metrics_igraph(W)
+    return _graph_metrics_networkx(W)
+
+
+def _graph_metrics_igraph(W: np.ndarray) -> Dict[str, object]:
+    """Graph metrics via igraph (10-100x faster than NetworkX)."""
+    import igraph as ig
+
+    R = W.shape[0]
+    sources, targets = np.where(np.triu(W, k=1) > 0)
+    weights = W[sources, targets]
+
+    G = ig.Graph(n=R, edges=list(zip(sources.tolist(), targets.tolist())),
+                 directed=False)
+    G.es["weight"] = weights.tolist()
+
+    result = {
+        "n_nodes": G.vcount(),
+        "n_edges": G.ecount(),
+        "density": G.density(),
+        "strength": dict(enumerate(G.strength(weights="weight"))),
+        "degree": dict(enumerate(G.degree())),
+        "clustering": dict(enumerate(G.transitivity_local_undirected(
+            weights="weight"))),
+    }
+
+    btw = G.betweenness(weights="weight")
+    norm = max((R - 1) * (R - 2) / 2, 1)
+    result["betweenness"] = dict(enumerate([b / norm for b in btw]))
+
+    try:
+        sp_mat = np.array(G.shortest_paths(weights="weight"))
+        sp_mat[sp_mat == 0] = np.inf
+        np.fill_diagonal(sp_mat, np.inf)
+        inv_sp = 1.0 / sp_mat
+        inv_sp[~np.isfinite(inv_sp)] = 0.0
+        result["global_efficiency"] = inv_sp.sum() / (R * (R - 1))
+    except Exception:
+        result["global_efficiency"] = np.nan
+
+    try:
+        partition = G.community_multilevel(weights="weight")
+        result["modularity"] = partition.modularity
+        result["communities"] = partition.membership
+    except Exception:
+        result["modularity"] = np.nan
+        result["communities"] = []
+
+    try:
+        result["assortativity"] = G.assortativity_degree(directed=False)
+    except Exception:
+        result["assortativity"] = np.nan
+
+    return result
+
+
+def _graph_metrics_networkx(W: np.ndarray) -> Dict[str, object]:
+    """Graph metrics via NetworkX (fallback)."""
+    import networkx as nx
+    from networkx.algorithms.community import greedy_modularity_communities
+
+    G = nx.from_numpy_array(W)
+    zero_edges = [(u, v) for u, v, d in G.edges(data=True) if d["weight"] <= 0]
+    G.remove_edges_from(zero_edges)
+
+    result = {
+        "n_nodes": G.number_of_nodes(),
+        "n_edges": G.number_of_edges(),
+        "density": nx.density(G),
+        "strength": dict(G.degree(weight="weight")),
+        "degree": dict(G.degree()),
+        "clustering": nx.clustering(G, weight="weight"),
+    }
+
+    try:
+        result["global_efficiency"] = nx.global_efficiency(G)
+    except Exception:
+        result["global_efficiency"] = np.nan
+
+    result["betweenness"] = nx.betweenness_centrality(G, weight="weight")
+
+    try:
+        communities = list(greedy_modularity_communities(G, weight="weight"))
+        result["modularity"] = nx.community.modularity(G, communities, weight="weight")
+        result["communities"] = communities
+    except Exception:
+        result["modularity"] = np.nan
+        result["communities"] = []
+
+    try:
+        result["assortativity"] = nx.degree_assortativity_coefficient(G, weight="weight")
+    except Exception:
+        result["assortativity"] = np.nan
+
+    return result
