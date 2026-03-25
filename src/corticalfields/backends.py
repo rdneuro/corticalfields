@@ -337,23 +337,27 @@ def _eigsh_cupy(
     L: sp.spmatrix, M: sp.spmatrix,
     k: int, tol: float, maxiter: int, dtype: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """CuPy GPU LOBPCG — faster but less reliable than ARPACK."""
+    """
+    CuPy GPU eigsh via cuSOLVER shift-invert.
+
+    Uses the same strategy as scipy ARPACK: shift-invert with σ = −0.01
+    transforms the smallest eigenvalues into the largest, which the
+    iterative solver handles efficiently. LOBPCG (the previous impl)
+    cannot do shift-invert and fails to converge on cortical meshes
+    because the LB spectrum has tiny gaps near zero.
+    """
     import cupy as cp
     import cupyx.scipy.sparse as csp
-    from cupyx.scipy.sparse.linalg import lobpcg
+    from cupyx.scipy.sparse.linalg import eigsh as cupy_eigsh
 
     np_dtype = np.float32 if dtype == "float32" else np.float64
-    cp_dtype = cp.float32 if dtype == "float32" else cp.float64
 
-    L_gpu = csp.csr_matrix(L.tocsr().astype(np_dtype))
-    M_gpu = csp.csr_matrix(M.tocsr().astype(np_dtype))
+    L_gpu = csp.csc_matrix(L.tocsc().astype(np_dtype))
+    M_gpu = csp.csc_matrix(M.tocsc().astype(np_dtype))
 
-    rng = cp.random.RandomState(seed=42)
-    X0 = rng.randn(L.shape[0], k, dtype=cp_dtype)
-
-    eigenvalues, eigenvectors = lobpcg(
-        L_gpu, X0, B=M_gpu,
-        largest=False, tol=tol, maxiter=maxiter,
+    eigenvalues, eigenvectors = cupy_eigsh(
+        L_gpu, k=k, M=M_gpu,
+        sigma=-0.01, which="LM",
     )
 
     evals = cp.asnumpy(eigenvalues).astype(np.float64)
