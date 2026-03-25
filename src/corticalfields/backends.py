@@ -338,16 +338,22 @@ def _eigsh_cupy(
     k: int, tol: float, maxiter: int, dtype: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    CuPy GPU eigsh via cuSOLVER shift-invert.
+    CuPy GPU eigensolver for the generalised problem Lφ = λMφ.
 
-    CuPy's eigsh only solves the standard problem Ax = λx, not the
-    generalised Lφ = λMφ. Since M is a diagonal lumped mass matrix
-    (guaranteed by CorticalFields Laplacian assembly), we transform:
+    CuPy eigsh API (from official docs, CuPy 14.0.1):
+        eigsh(a, k, *, which, v0, ncv, maxiter, tol, return_eigenvectors)
+        which: 'LM', 'LA', 'SA'
+        NOT supported: M= (no generalised), sigma= (no shift-invert)
 
-        M^{-1/2} L M^{-1/2} y = λ y,    φ = M^{-1/2} y
-
-    This is exact (no approximation) and adds negligible cost because
-    M^{-1/2} is just element-wise ops on the diagonal.
+    Strategy — spectral complement:
+        1. Transform to standard problem: A = M^{-1/2} L M^{-1/2}
+           (exact, M is diagonal lumped mass)
+        2. Find λ_max of A  (eigsh, k=1, which='LM' — <1 sec)
+        3. Form B = λ_max·I − A
+           Largest eigenvalues of B = smallest eigenvalues of A
+        4. eigsh(B, k, which='LM') — Lanczos converges fastest
+           at spectral extremes, so this is robust for k=300
+        5. Convert back: λ_i = λ_max − μ_i,  φ_i = M^{-1/2} y_i
     """
     import cupy as cp
     import cupyx.scipy.sparse as csp
@@ -355,27 +361,32 @@ def _eigsh_cupy(
 
     np_dtype = np.float32 if dtype == "float32" else np.float64
 
-    # ── Extract M diagonal and compute M^{-1/2} ─────────────────────
+    # ── Step 1: Generalised → standard via M^{-1/2} ─────────────────
     M_diag = np.array(M.diagonal()).ravel().astype(np_dtype)
-    M_diag = np.maximum(M_diag, 1e-16)           # avoid division by zero
-    M_inv_sqrt = 1.0 / np.sqrt(M_diag)
-    D = sp.diags(M_inv_sqrt, format="csc").astype(np_dtype)
+    M_diag = np.maximum(M_diag, 1e-16)
+    M_inv_sqrt = (1.0 / np.sqrt(M_diag)).astype(np_dtype)
 
-    # ── Transform: A = M^{-1/2} L M^{-1/2} (symmetric) ─────────────
-    A = D @ L.tocsc().astype(np_dtype) @ D
-    A_gpu = csp.csc_matrix(A)
+    D = sp.diags(M_inv_sqrt, format="csc", dtype=np_dtype)
+    A_cpu = (D @ L.tocsc().astype(np_dtype) @ D).tocsc()
 
-    # ── Standard eigsh with shift-invert ─────────────────────────────
-    eigenvalues, Y = cupy_eigsh(
-        A_gpu, k=k,
-        sigma=-0.01, which="LM",
-    )
+    # ── Step 2: Find λ_max (k=1, which='LM') ────────────────────────
+    A_gpu = csp.csc_matrix(A_cpu)
+    lm_vals, _ = cupy_eigsh(A_gpu, k=1, which='LM')
+    lambda_max = float(cp.asnumpy(lm_vals)[0]) * 1.01   # 1% buffer
 
-    # ── Recover original eigenvectors: φ = M^{-1/2} y ───────────────
-    eigenvectors = cp.asnumpy(Y) * M_inv_sqrt[:, None]
+    # ── Step 3: Spectral complement B = λ_max·I − A ─────────────────
+    N = A_cpu.shape[0]
+    B_cpu = (sp.eye(N, format="csc", dtype=np_dtype) * np_dtype(lambda_max)
+             - A_cpu).tocsc()
+    B_gpu = csp.csc_matrix(B_cpu)
 
-    evals = cp.asnumpy(eigenvalues).astype(np.float64)
-    evecs = eigenvectors.astype(np.float64)
+    # ── Step 4: k largest of B = k smallest of A ────────────────────
+    mu, Y = cupy_eigsh(B_gpu, k=k, which='LM', maxiter=maxiter, tol=tol)
+
+    # ── Step 5: Convert eigenvalues back, recover eigenvectors ───────
+    evals = (lambda_max - cp.asnumpy(mu)).astype(np.float64)
+    evecs = (cp.asnumpy(Y) * M_inv_sqrt[:, None]).astype(np.float64)
+
     order = np.argsort(evals)
     return evals[order], evecs[:, order]
 
