@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corticalfields"
-version = "0.3.0"
+version = "0.1.3"
 description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors, Bayesian analysis, and information-theoretic surprise maps."
 readme = "README.md"
 license = {text = "MIT"}
