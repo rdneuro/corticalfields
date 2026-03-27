@@ -6,25 +6,6 @@ manifold using spectral Matérn Gaussian Processes, Heat Kernel Signatures,
 and Laplace–Beltrami spectral analysis. Designed for structural MRI (T1w)
 data in clinical neuroimaging, with emphasis on epilepsy (MTLE-HS).
 
-GPU acceleration
-----------------
-CorticalFields supports three compute backends:
-  - ``"scipy"`` (default) — CPU-only, most robust
-  - ``"cupy"``  — GPU via NVIDIA CUDA (3–10× eigensolver speedup)
-  - ``"torch"`` — GPU via PyTorch CUDA
-
-Use ``corticalfields.backends.available_backends()`` to check what's
-available on your system. All compute-intensive functions accept a
-``backend=`` parameter.
-
-Bayesian analysis
------------------
-The ``bayesian`` submodule provides 10 reusable model classes for
-neuroimaging research (horseshoe, R2-D2, BEST, hierarchical, mediation,
-classification, change-point, DAG). All models support 4 sampler
-backends: pymc, nutpie, numpyro, blackjax.  The ``bayes_viz`` submodule
-provides 20 publication-quality plotting functions.
-
 Core pipeline:
     1. Load FreeSurfer surfaces and morphometric overlays
     2. Compute Laplace–Beltrami eigenpairs on the cortical mesh
@@ -37,29 +18,22 @@ Modules
 -------
 surface     : Surface I/O — FreeSurfer, GIfTI, mesh utilities
 spectral    : Laplace–Beltrami decomposition, HKS, WKS, GPS
-backends    : GPU backend abstraction (CuPy, PyTorch, SciPy)
 kernels     : Spectral Matérn kernels for GPyTorch
 normative   : GP-based normative modeling pipeline
 surprise    : Information-theoretic anomaly scoring
 features    : Morphometric feature extraction from FreeSurfer
 graphs      : Cortical similarity network construction
-bayesian    : Bayesian statistical analysis (PyMC, ArviZ, PreliZ)
-bayes_viz   : Publication-quality Bayesian visualization (20 functions)
 viz         : Publication-quality surface visualization
-pointcloud  : Mesh-free point cloud cortical geometry (LBO on point clouds)
-functional_maps : Functional maps (C matrix) for cortical correspondence
-transport   : Optimal transport distances and kernels (Wasserstein, Sinkhorn)
-asymmetry   : Atlas-free cortical asymmetry quantification
-distance_stats : Distance-based statistical inference (MDMR, HSIC, Mantel, KRR)
+brainplots  : Publication-grade brain plots (surfaces, graphs, matrices, composites)
 """
 
-__version__ = "0.2.0"
-__author__ = "Debpna, R. (rdneuro)"
+__version__ = "0.1.0"
+__author__ = "Velho Mago (rdneuro)"
 
 # ── Lazy imports ────────────────────────────────────────────────────────
-# Heavy dependencies (torch, gpytorch, cupy, pymc, arviz) are only loaded
-# when the modules that need them are first accessed. This keeps
-# `import corticalfields` fast and memory-light for submodule-level usage.
+# Heavy dependencies (torch, gpytorch) are only loaded when the modules
+# that need them are first accessed. This keeps `import corticalfields`
+# fast and memory-light for submodule-level usage.
 
 
 def __getattr__(name: str):
@@ -68,19 +42,11 @@ def __getattr__(name: str):
         # surface.py (lightweight — numpy/nibabel only)
         "CorticalSurface": ("corticalfields.surface", "CorticalSurface"),
         "load_freesurfer_surface": ("corticalfields.surface", "load_freesurfer_surface"),
-        # spectral.py (lightweight core — numpy/scipy; GPU via backends)
+        # spectral.py (lightweight — numpy/scipy only)
         "LaplaceBeltrami": ("corticalfields.spectral", "LaplaceBeltrami"),
-        "compute_eigenpairs": ("corticalfields.spectral", "compute_eigenpairs"),
         "heat_kernel_signature": ("corticalfields.spectral", "heat_kernel_signature"),
         "wave_kernel_signature": ("corticalfields.spectral", "wave_kernel_signature"),
         "global_point_signature": ("corticalfields.spectral", "global_point_signature"),
-        "spectral_feature_matrix": ("corticalfields.spectral", "spectral_feature_matrix"),
-        # backends.py (lightweight detection; GPU libs imported lazily)
-        "available_backends": ("corticalfields.backends", "available_backends"),
-        "available_laplacian_backends": ("corticalfields.backends", "available_laplacian_backends"),
-        "resolve_backend": ("corticalfields.backends", "resolve_backend"),
-        "compute_graph_metrics": ("corticalfields.backends", "compute_graph_metrics"),
-        "vectorized_correlation_matrix": ("corticalfields.backends", "vectorized_correlation_matrix"),
         # kernels.py (heavy — torch + gpytorch)
         "SpectralMaternKernel": ("corticalfields.kernels", "SpectralMaternKernel"),
         # normative.py (heavy — torch + gpytorch)
@@ -90,64 +56,27 @@ def __getattr__(name: str):
         "compute_surprise": ("corticalfields.surprise", "compute_surprise"),
         # features.py (lightweight)
         "MorphometricProfile": ("corticalfields.features", "MorphometricProfile"),
-        # bayesian.py (heavy — pymc + arviz; lazy-loaded)
-        "SamplerConfig": ("corticalfields.bayesian", "SamplerConfig"),
-        "FAST": ("corticalfields.bayesian", "FAST"),
-        "PUBLICATION": ("corticalfields.bayesian", "PUBLICATION"),
-        "HORSESHOE": ("corticalfields.bayesian", "HORSESHOE"),
-        "HorseshoeRegression": ("corticalfields.bayesian", "HorseshoeRegression"),
-        "R2D2Regression": ("corticalfields.bayesian", "R2D2Regression"),
-        "BayesianRidge": ("corticalfields.bayesian", "BayesianRidge"),
-        "BayesianGroupComparison": ("corticalfields.bayesian", "BayesianGroupComparison"),
-        "BayesianCorrelation": ("corticalfields.bayesian", "BayesianCorrelation"),
-        "BayesianMediation": ("corticalfields.bayesian", "BayesianMediation"),
-        "HierarchicalRegression": ("corticalfields.bayesian", "HierarchicalRegression"),
-        "BayesianLogistic": ("corticalfields.bayesian", "BayesianLogistic"),
-        "BayesianChangePoint": ("corticalfields.bayesian", "BayesianChangePoint"),
-        "BayesianDAG": ("corticalfields.bayesian", "BayesianDAG"),
-        "compute_diagnostics": ("corticalfields.bayesian", "compute_diagnostics"),
-        "model_comparison": ("corticalfields.bayesian", "model_comparison"),
-        "bayesian_r2": ("corticalfields.bayesian", "bayesian_r2"),
-        "probability_of_direction": ("corticalfields.bayesian", "probability_of_direction"),
-        "rope_percentage": ("corticalfields.bayesian", "rope_percentage"),
-        "savage_dickey_bf": ("corticalfields.bayesian", "savage_dickey_bf"),
-        "shrinkage_metrics": ("corticalfields.bayesian", "shrinkage_metrics"),
-        "to_latex_table": ("corticalfields.bayesian", "to_latex_table"),
-        "elicit_prior": ("corticalfields.bayesian", "elicit_prior"),
-        "enigma_informed_prior": ("corticalfields.bayesian", "enigma_informed_prior"),
-        "ENIGMA_EFFECT_SIZES": ("corticalfields.bayesian", "ENIGMA_EFFECT_SIZES"),
-        # pointcloud.py (mesh-free LBO — requires robust_laplacian)
-        "CorticalPointCloud": ("corticalfields.pointcloud", "CorticalPointCloud"),
-        "from_freesurfer_surface": ("corticalfields.pointcloud", "from_freesurfer_surface"),
-        "from_cortical_surface": ("corticalfields.pointcloud", "from_cortical_surface"),
-        "from_nifti_mask": ("corticalfields.pointcloud", "from_nifti_mask"),
-        "compute_pointcloud_eigenpairs": ("corticalfields.pointcloud", "compute_pointcloud_eigenpairs"),
-        # functional_maps.py (spectral correspondence)
-        "FunctionalMap": ("corticalfields.functional_maps", "FunctionalMap"),
-        "compute_functional_map": ("corticalfields.functional_maps", "compute_functional_map"),
-        "compute_interhemispheric_map": ("corticalfields.functional_maps", "compute_interhemispheric_map"),
-        "zoomout_refine": ("corticalfields.functional_maps", "zoomout_refine"),
-        "transfer_function": ("corticalfields.functional_maps", "transfer_function"),
-        # transport.py (optimal transport — requires POT)
-        "TransportResult": ("corticalfields.transport", "TransportResult"),
-        "sliced_wasserstein_distance": ("corticalfields.transport", "sliced_wasserstein_distance"),
-        "sinkhorn_divergence": ("corticalfields.transport", "sinkhorn_divergence"),
-        "pairwise_wasserstein_matrix": ("corticalfields.transport", "pairwise_wasserstein_matrix"),
-        "wasserstein_kernel": ("corticalfields.transport", "wasserstein_kernel"),
-        # asymmetry.py (atlas-free asymmetry)
-        "AsymmetryProfile": ("corticalfields.asymmetry", "AsymmetryProfile"),
-        "asymmetry_from_functional_map": ("corticalfields.asymmetry", "asymmetry_from_functional_map"),
-        "asymmetry_from_wasserstein": ("corticalfields.asymmetry", "asymmetry_from_wasserstein"),
-        "combined_asymmetry": ("corticalfields.asymmetry", "combined_asymmetry"),
-        "classical_asymmetry_index": ("corticalfields.asymmetry", "classical_asymmetry_index"),
-        # distance_stats.py (distance-based inference)
-        "StatisticalResult": ("corticalfields.distance_stats", "StatisticalResult"),
-        "mdmr": ("corticalfields.distance_stats", "mdmr"),
-        "hsic": ("corticalfields.distance_stats", "hsic"),
-        "distance_correlation": ("corticalfields.distance_stats", "distance_correlation"),
-        "mantel_test": ("corticalfields.distance_stats", "mantel_test"),
-        "kernel_ridge_regression": ("corticalfields.distance_stats", "kernel_ridge_regression"),
-        "outcome_kernel": ("corticalfields.distance_stats", "outcome_kernel"),
+        # brainplots.py (publication-grade visualization — pyvista + matplotlib)
+        "plot_surface_4view": ("corticalfields.brainplots", "plot_surface_4view"),
+        "plot_surface_comparison": ("corticalfields.brainplots", "plot_surface_comparison"),
+        "plot_surprise_brain": ("corticalfields.brainplots", "plot_surprise_brain"),
+        "plot_normative_result": ("corticalfields.brainplots", "plot_normative_result"),
+        "plot_hks_multiscale": ("corticalfields.brainplots", "plot_hks_multiscale"),
+        "plot_asymmetry_brain": ("corticalfields.brainplots", "plot_asymmetry_brain"),
+        "plot_connectivity_matrix": ("corticalfields.brainplots", "plot_connectivity_matrix"),
+        "plot_functional_map_matrix": ("corticalfields.brainplots", "plot_functional_map_matrix"),
+        "plot_distance_matrix": ("corticalfields.brainplots", "plot_distance_matrix"),
+        "plot_permutation_null": ("corticalfields.brainplots", "plot_permutation_null"),
+        "plot_eigenspectrum": ("corticalfields.brainplots", "plot_eigenspectrum"),
+        "plot_network_radar": ("corticalfields.brainplots", "plot_network_radar"),
+        "plot_network_anomaly_bars": ("corticalfields.brainplots", "plot_network_anomaly_bars"),
+        "plot_brain_connectome": ("corticalfields.brainplots", "plot_brain_connectome"),
+        "plot_network_graph": ("corticalfields.brainplots", "plot_network_graph"),
+        "plot_asymmetry_bands": ("corticalfields.brainplots", "plot_asymmetry_bands"),
+        "plot_krr_diagnostic": ("corticalfields.brainplots", "plot_krr_diagnostic"),
+        "plot_subcortical_3d": ("corticalfields.brainplots", "plot_subcortical_3d"),
+        "plot_composite_figure": ("corticalfields.brainplots", "plot_composite_figure"),
+        "save_figure": ("corticalfields.brainplots", "save_figure"),
     }
     if name in _MAP:
         module_path, attr = _MAP[name]
@@ -158,53 +87,22 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    # Surface I/O
     "CorticalSurface", "load_freesurfer_surface",
-    # Spectral analysis (with GPU support)
-    "LaplaceBeltrami", "compute_eigenpairs",
-    "heat_kernel_signature", "wave_kernel_signature",
-    "global_point_signature", "spectral_feature_matrix",
-    # Backend management
-    "available_backends", "available_laplacian_backends",
-    "resolve_backend", "compute_graph_metrics",
-    "vectorized_correlation_matrix",
-    # GP kernels & normative modeling
-    "SpectralMaternKernel", "CorticalNormativeModel",
-    # Surprise maps
+    "LaplaceBeltrami", "heat_kernel_signature",
+    "wave_kernel_signature", "global_point_signature",
+    "SpectralMaternKernel",
+    "CorticalNormativeModel",
     "SurpriseMap", "compute_surprise",
-    # Feature extraction
     "MorphometricProfile",
-    # Bayesian analysis — sampler config & presets
-    "SamplerConfig", "FAST", "PUBLICATION", "HORSESHOE",
-    # Bayesian analysis — model classes
-    "HorseshoeRegression", "R2D2Regression", "BayesianRidge",
-    "BayesianGroupComparison", "BayesianCorrelation",
-    "BayesianMediation", "HierarchicalRegression",
-    "BayesianLogistic", "BayesianChangePoint", "BayesianDAG",
-    # Bayesian analysis — diagnostics & metrics
-    "compute_diagnostics", "model_comparison", "bayesian_r2",
-    "probability_of_direction", "rope_percentage",
-    "savage_dickey_bf", "shrinkage_metrics", "to_latex_table",
-    # Bayesian analysis — prior elicitation
-    "elicit_prior", "enigma_informed_prior", "ENIGMA_EFFECT_SIZES",
-    # Point cloud geometry (mesh-free)
-    "CorticalPointCloud",
-    "from_freesurfer_surface", "from_cortical_surface", "from_nifti_mask",
-    "compute_pointcloud_eigenpairs",
-    # Functional maps (spectral correspondence)
-    "FunctionalMap",
-    "compute_functional_map", "compute_interhemispheric_map",
-    "zoomout_refine", "transfer_function",
-    # Optimal transport
-    "TransportResult",
-    "sliced_wasserstein_distance", "sinkhorn_divergence",
-    "pairwise_wasserstein_matrix", "wasserstein_kernel",
-    # Asymmetry quantification
-    "AsymmetryProfile",
-    "asymmetry_from_functional_map", "asymmetry_from_wasserstein",
-    "combined_asymmetry", "classical_asymmetry_index",
-    # Distance-based statistical inference
-    "StatisticalResult",
-    "mdmr", "hsic", "distance_correlation", "mantel_test",
-    "kernel_ridge_regression", "outcome_kernel",
+    # Brain visualization (publication-grade)
+    "plot_surface_4view", "plot_surface_comparison",
+    "plot_surprise_brain", "plot_normative_result",
+    "plot_hks_multiscale", "plot_asymmetry_brain",
+    "plot_connectivity_matrix", "plot_functional_map_matrix",
+    "plot_distance_matrix", "plot_permutation_null",
+    "plot_eigenspectrum", "plot_network_radar",
+    "plot_network_anomaly_bars", "plot_brain_connectome",
+    "plot_network_graph", "plot_asymmetry_bands",
+    "plot_krr_diagnostic", "plot_subcortical_3d",
+    "plot_composite_figure", "save_figure",
 ]

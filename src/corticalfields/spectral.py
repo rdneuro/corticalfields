@@ -16,18 +16,8 @@ This module is the mathematical core of CorticalFields. It computes:
        • Wave Kernel Signature   — WKS(x, e)
        • Global Point Signature  — GPS(x)
 
-GPU acceleration
-----------------
-All compute-intensive functions accept a ``backend`` parameter:
-  - ``"auto"``  — selects the best available (cupy → torch → scipy)
-  - ``"scipy"`` — CPU-only, ARPACK shift-invert (most robust)
-  - ``"cupy"``  — GPU via CuPy LOBPCG + CuPy array ops
-  - ``"torch"`` — GPU via PyTorch LOBPCG + tensor ops
-
-The eigensolver is the bottleneck (~30–120s on CPU for 300 eigenpairs
-on a 150K-vertex mesh). GPU backends achieve 3–10× speedup. The
-spectral descriptors are pure GEMM operations completing in <1ms on
-GPU regardless of backend.
+These descriptors capture multi-scale geometric information on the cortical
+surface and serve as features for the downstream GP normative model.
 
 Mathematical background
 -----------------------
@@ -65,16 +55,20 @@ from typing import Optional, Tuple, Union
 
 import numpy as np
 import scipy.sparse as sp
-
-from corticalfields.backends import (
-    ArrayBackend,
-    Backend,
-    compute_laplacian as _backends_compute_laplacian,
-    eigsh_solve,
-    resolve_backend,
-)
+from scipy.sparse.linalg import eigsh
 
 logger = logging.getLogger(__name__)
+
+# Try to import robust-laplacian (preferred); fall back to our own
+# cotangent Laplacian implementation if unavailable.
+try:
+    import robust_laplacian
+
+    _HAS_ROBUST_LAP = True
+    logger.debug("Using robust-laplacian (Sharp & Crane, SGP 2020).")
+except ImportError:
+    _HAS_ROBUST_LAP = False
+    logger.debug("robust-laplacian not found; using cotangent Laplacian.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -109,7 +103,7 @@ class LaplaceBeltrami:
 
     @property
     def n_vertices(self) -> int:
-        return self.eigenvectors.shape[0]
+        return self.stiffness.shape[0]
 
     @property
     def n_eigenpairs(self) -> int:
@@ -120,26 +114,22 @@ def compute_laplacian(
     vertices: np.ndarray,
     faces: np.ndarray,
     use_robust: bool = True,
-    method: str = "auto",
 ) -> Tuple[sp.csc_matrix, sp.csc_matrix]:
     """
     Build the discrete Laplace–Beltrami stiffness and mass matrices.
 
-    Delegates to ``backends.compute_laplacian`` with a 3-level fallback:
-      1. robust-laplacian (intrinsic Delaunay, non-manifold safe)
-      2. LaPy (vectorized FEM cotangent, optional CHOLMOD)
-      3. built-in vectorized cotangent (pure NumPy)
+    When ``robust-laplacian`` is available and ``use_robust=True``, uses
+    the intrinsic Delaunay refinement method (Sharp & Crane 2020), which
+    is numerically stable even on poor-quality or non-manifold meshes.
+
+    Otherwise, falls back to the standard cotangent scheme.
 
     Parameters
     ----------
     vertices : (N, 3) float64
     faces    : (F, 3) int64
     use_robust : bool
-        Backward-compatible flag. If True and method="auto", prefers
-        robust-laplacian. If False, skips robust and uses lapy/builtin.
-    method : str
-        Explicit Laplacian method: ``"auto"``, ``"robust"``, ``"lapy"``,
-        or ``"builtin"``. Overrides ``use_robust`` when not ``"auto"``.
+        Prefer robust-laplacian if installed.
 
     Returns
     -------
@@ -148,14 +138,64 @@ def compute_laplacian(
     M : scipy.sparse.csc_matrix (N, N)
         Diagonal lumped mass matrix.
     """
-    # Backward compatibility: if method is explicitly set, use it;
-    # otherwise, use_robust controls whether robust-laplacian is tried
-    if method != "auto":
-        return _backends_compute_laplacian(vertices, faces, method=method)
-    if not use_robust:
-        # Skip robust-laplacian, try lapy → builtin
-        return _backends_compute_laplacian(vertices, faces, method="lapy")
-    return _backends_compute_laplacian(vertices, faces, method="auto")
+    if use_robust and _HAS_ROBUST_LAP:
+        L, M = robust_laplacian.mesh_laplacian(
+            np.asarray(vertices, dtype=np.float64),
+            np.asarray(faces, dtype=np.int64),
+        )
+        return sp.csc_matrix(L), sp.csc_matrix(M)
+
+    # ── Cotangent Laplacian (Meyer et al. 2003) ────────────────────────
+    N = vertices.shape[0]
+    v = vertices.astype(np.float64)
+    f = faces.astype(np.int64)
+
+    # For each triangle (i, j, k), compute cotangent of the angle at
+    # vertex k for the edge (i, j), and accumulate into L.
+    rows, cols, vals = [], [], []
+    areas = np.zeros(N, dtype=np.float64)
+
+    for tri in f:
+        i, j, k = int(tri[0]), int(tri[1]), int(tri[2])
+        vi, vj, vk = v[i], v[j], v[k]
+
+        # Edge vectors
+        eij = vj - vi  # edge from i to j
+        eik = vk - vi  # edge from i to k
+        ejk = vk - vj  # edge from j to k
+
+        # Cotangent weights for each angle
+        # Angle at i  → weight for edge (j, k)
+        cot_i = _safe_cot(eij, eik)
+        # Angle at j  → weight for edge (i, k)
+        cot_j = _safe_cot(-eij, ejk)
+        # Angle at k  → weight for edge (i, j)
+        cot_k = _safe_cot(-eik, -ejk)
+
+        # Stiffness contributions (off-diagonal: −½ cotangent)
+        for (a, b, w) in [(j, k, cot_i), (i, k, cot_j), (i, j, cot_k)]:
+            rows.extend([a, b])
+            cols.extend([b, a])
+            vals.extend([-0.5 * w, -0.5 * w])
+
+        # Triangle area (for mass matrix)
+        tri_area = 0.5 * np.linalg.norm(np.cross(eij, eik))
+        # Distribute ⅓ of area to each vertex (lumped)
+        areas[i] += tri_area / 3.0
+        areas[j] += tri_area / 3.0
+        areas[k] += tri_area / 3.0
+
+    # Assemble stiffness
+    L = sp.coo_matrix((vals, (rows, cols)), shape=(N, N)).tocsc()
+    # Make diagonal = −Σ off-diagonal (ensures row-sum = 0)
+    diag = -np.array(L.sum(axis=1)).ravel()
+    L = L + sp.diags(diag, format="csc")
+
+    # Lumped mass matrix
+    areas[areas < 1e-16] = 1e-16  # avoid zero mass
+    M = sp.diags(areas, format="csc")
+
+    return L, M
 
 
 def compute_eigenpairs(
@@ -164,9 +204,6 @@ def compute_eigenpairs(
     n_eigenpairs: int = 300,
     use_robust: bool = True,
     sigma: float = -0.01,
-    backend: str = "auto",
-    dtype: str = "float64",
-    laplacian_method: str = "auto",
 ) -> LaplaceBeltrami:
     """
     Compute the leading eigenpairs of the LB operator on a mesh.
@@ -182,65 +219,43 @@ def compute_eigenpairs(
     n_eigenpairs : int
         Number of eigenpairs to compute (including λ_0 = 0).
     use_robust : bool
-        Backward-compatible flag for Laplacian assembly.
+        Prefer robust-laplacian if available.
     sigma : float
-        Shift-invert parameter for scipy backend. Ignored by GPU backends.
-    backend : str
-        Eigensolver backend: ``'auto'``, ``'scipy'``, ``'cupy'``, ``'torch'``.
-    dtype : str
-        Internal precision: ``'float64'`` (default) or ``'float32'``.
-    laplacian_method : str
-        Laplacian assembly method: ``'auto'``, ``'robust'``, ``'lapy'``,
-        or ``'builtin'``. When ``'auto'``, uses the 3-level fallback chain.
+        Shift-invert parameter for ``scipy.sparse.linalg.eigsh``.
+        A small negative value targets the smallest eigenvalues.
 
     Returns
     -------
     LaplaceBeltrami
-
-    Examples
-    --------
-    >>> # Default: best Laplacian + scipy ARPACK (most robust)
-    >>> lb = compute_eigenpairs(vertices, faces)
-
-    >>> # Explicit LaPy Laplacian + scipy eigensolver
-    >>> lb = compute_eigenpairs(vertices, faces, laplacian_method="lapy")
-
-    >>> # GPU eigensolver (CuPy LOBPCG)
-    >>> lb = compute_eigenpairs(vertices, faces, backend="cupy")
-
-    >>> # LaPy Laplacian + GPU descriptors (mix-and-match)
-    >>> lb = compute_eigenpairs(vertices, faces, laplacian_method="lapy")
-    >>> features = spectral_feature_matrix(lb, backend="cupy")
+        Object with stiffness, mass, eigenvalues, eigenvectors.
 
     Notes
     -----
-    The Laplacian is always assembled on CPU (the assembly is fast
-    and produces SciPy sparse matrices). Only the eigensolver and
-    descriptor computation benefit from GPU acceleration.
+    The generalised eigenproblem ``L φ = λ M φ`` is solved using
+    ARPACK's shift-invert mode (via ``eigsh``), which is efficient
+    for the smallest eigenvalues of large sparse systems.
 
     For a typical FreeSurfer mesh (~150k vertices), computing 300
-    eigenpairs takes 30–120s on CPU, 5–30s on GPU.
+    eigenpairs takes 1–3 minutes on a modern CPU.
     """
     logger.info(
-        "Computing %d LB eigenpairs for mesh with %d vertices (backend=%s)…",
-        n_eigenpairs, vertices.shape[0], backend,
+        "Computing %d LB eigenpairs for mesh with %d vertices…",
+        n_eigenpairs, vertices.shape[0],
     )
 
-    # Step 1: Build Laplacian (always on CPU — fast, ~100ms)
-    # Uses the 3-level fallback: robust → lapy → builtin
-    L, M = compute_laplacian(
-        vertices, faces,
-        use_robust=use_robust, method=laplacian_method,
+    L, M = compute_laplacian(vertices, faces, use_robust=use_robust)
+
+    # Solve generalised eigenvalue problem: L φ = λ M φ
+    # sigma < 0 ⟹ shift-invert near zero (target smallest eigenvalues)
+    eigenvalues, eigenvectors = eigsh(
+        L, k=n_eigenpairs, M=M, sigma=sigma, which="LM",
     )
 
-    # Step 2: Solve eigenvalue problem (dispatched to backend)
-    eigenvalues, eigenvectors = eigsh_solve(
-        L, M,
-        k=n_eigenpairs,
-        backend=backend,
-        sigma=sigma,
-        dtype=dtype,
-    )
+    # eigsh returns eigenvalues in increasing order for shift-invert
+    # but sort explicitly to be safe
+    order = np.argsort(eigenvalues)
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
 
     # Clamp tiny/negative eigenvalues to zero (numerical noise)
     eigenvalues = np.maximum(eigenvalues, 0.0)
@@ -270,7 +285,6 @@ def heat_kernel_signature(
     n_scales: int = 16,
     t_min: Optional[float] = None,
     t_max: Optional[float] = None,
-    backend: str = "scipy",
 ) -> np.ndarray:
     """
     Heat Kernel Signature (Sun, Ovsjanikov & Guibas, 2009).
@@ -295,10 +309,6 @@ def heat_kernel_signature(
     t_min, t_max : float or None
         Bounds for auto time scales. Defaults:
         ``t_min = 4 ln(10) / λ_max``, ``t_max = 4 ln(10) / λ_1``.
-    backend : str
-        Compute backend for the dense GEMM. Descriptors are pure
-        matrix operations: ``phi_sq @ weights``. On GPU, this is a
-        single cuBLAS/cuDNN call completing in <1ms for 150K × 300.
 
     Returns
     -------
@@ -310,32 +320,27 @@ def heat_kernel_signature(
     The first eigenvalue λ_0 ≈ 0 is excluded from the sum to avoid
     a constant offset that carries no geometric information.
     """
-    ab = ArrayBackend.create(backend)
-
     # Exclude λ_0 ≈ 0 (constant eigenfunction)
-    evals_np = lb.eigenvalues[1:]
-    evecs_np = lb.eigenvectors[:, 1:]
+    evals = lb.eigenvalues[1:]
+    evecs = lb.eigenvectors[:, 1:]
 
     if time_scales is None:
-        lam_min = max(evals_np[0], 1e-8)
-        lam_max = evals_np[-1]
+        # Heuristic time range from Sun et al. 2009
+        lam_min = max(evals[0], 1e-8)
+        lam_max = evals[-1]
         if t_min is None:
             t_min = 4.0 * np.log(10) / lam_max
         if t_max is None:
             t_max = 4.0 * np.log(10) / lam_min
         time_scales = np.logspace(np.log10(t_min), np.log10(t_max), n_scales)
 
-    # Transfer to backend
-    evals = ab.asarray(evals_np)
-    evecs = ab.asarray(evecs_np)
-    t_arr = ab.asarray(time_scales)
+    # Compute HKS: for each time t, h(x,t) = Σ_i exp(-λ_i t) φ_i(x)²
+    # Shape: (K,) × (T,) → (K, T) exponential weights
+    weights = np.exp(-evals[:, None] * time_scales[None, :])  # (K, T)
+    phi_sq = evecs ** 2  # (N, K)
+    hks = phi_sq @ weights  # (N, T)
 
-    # HKS: phi_sq @ exp_weights → (N, T) GEMM
-    weights = ab.exp(-evals[:, None] * t_arr[None, :])  # (K, T)
-    phi_sq = ab.square(evecs)  # (N, K)
-    hks = ab.matmul(phi_sq, weights)  # (N, T)
-
-    return ab.to_numpy(hks)
+    return hks
 
 
 def wave_kernel_signature(
@@ -344,7 +349,6 @@ def wave_kernel_signature(
     sigma: Optional[float] = None,
     e_min: Optional[float] = None,
     e_max: Optional[float] = None,
-    backend: str = "scipy",
 ) -> np.ndarray:
     """
     Wave Kernel Signature (Aubry, Schlickewei & Cremers, 2011).
@@ -363,62 +367,53 @@ def wave_kernel_signature(
     Parameters
     ----------
     lb : LaplaceBeltrami
+        Pre-computed eigenpairs.
     n_energies : int
+        Number of energy levels to sample.
     sigma : float or None
+        Bandwidth of the log-normal filter. Default: 7× the energy spacing.
     e_min, e_max : float or None
-    backend : str
-        Compute backend for dense operations.
+        Bounds for energy levels in log-eigenvalue space.
 
     Returns
     -------
     wks : np.ndarray, shape (N, E)
+        WKS values at each vertex and energy level.
     """
-    ab = ArrayBackend.create(backend)
+    # Exclude λ_0 ≈ 0; work in log-space
+    evals = lb.eigenvalues[1:]
+    evecs = lb.eigenvectors[:, 1:]
 
-    evals_np = lb.eigenvalues[1:]
-    evecs_np = lb.eigenvectors[:, 1:]
+    log_evals = np.log(np.maximum(evals, 1e-12))
 
-    log_evals_np = np.log(np.maximum(evals_np, 1e-12))
     if e_min is None:
-        e_min = log_evals_np[0]
+        e_min = log_evals[0]
     if e_max is None:
-        e_max = log_evals_np[-1]
+        e_max = log_evals[-1]
 
-    energies_np = np.linspace(e_min, e_max, n_energies)
-    delta_e = energies_np[1] - energies_np[0] if n_energies > 1 else 1.0
+    energies = np.linspace(e_min, e_max, n_energies)
+    delta_e = energies[1] - energies[0] if n_energies > 1 else 1.0
+
     if sigma is None:
         sigma = 7.0 * delta_e
 
-    # Transfer to backend
-    log_evals = ab.asarray(log_evals_np)
-    energies = ab.asarray(energies_np)
-    evecs = ab.asarray(evecs_np)
-
-    # WKS weights: log-normal filter
+    # Weights: (K, E) — log-normal filter for each eigenvalue at each energy
     diff = energies[None, :] - log_evals[:, None]  # (K, E)
-    weights = ab.exp(-ab.square(diff) / (2.0 * sigma ** 2))  # (K, E)
+    weights = np.exp(-diff ** 2 / (2.0 * sigma ** 2))  # (K, E)
 
     # Normalisation per energy level
-    if ab._is_torch:
-        import torch
-        norm = weights.sum(dim=0, keepdim=True)
-        norm = torch.clamp(norm, min=1e-16)
-    else:
-        norm = weights.sum(axis=0, keepdims=True)
-        norm_np = ab.to_numpy(norm)
-        norm_np[norm_np < 1e-16] = 1e-16
-        norm = ab.asarray(norm_np)
+    norm = weights.sum(axis=0, keepdims=True)  # (1, E)
+    norm[norm < 1e-16] = 1e-16
 
-    phi_sq = ab.square(evecs)  # (N, K)
-    wks = ab.matmul(phi_sq, weights) / norm  # (N, E)
+    phi_sq = evecs ** 2  # (N, K)
+    wks = (phi_sq @ weights) / norm  # (N, E)
 
-    return ab.to_numpy(wks)
+    return wks
 
 
 def global_point_signature(
     lb: LaplaceBeltrami,
     n_components: Optional[int] = None,
-    backend: str = "scipy",
 ) -> np.ndarray:
     """
     Global Point Signature (Rustamov, 2007).
@@ -434,29 +429,23 @@ def global_point_signature(
     ----------
     lb : LaplaceBeltrami
     n_components : int or None
-    backend : str
-        Compute backend for the scaling operation.
+        How many components to use (default: all non-zero).
 
     Returns
     -------
     gps : np.ndarray, shape (N, K)
     """
-    ab = ArrayBackend.create(backend)
-
-    evals_np = lb.eigenvalues[1:]
-    evecs_np = lb.eigenvectors[:, 1:]
+    evals = lb.eigenvalues[1:]  # skip λ_0 = 0
+    evecs = lb.eigenvectors[:, 1:]
 
     if n_components is not None:
-        evals_np = evals_np[:n_components]
-        evecs_np = evecs_np[:, :n_components]
+        evals = evals[:n_components]
+        evecs = evecs[:, :n_components]
 
-    evals = ab.asarray(evals_np)
-    evecs = ab.asarray(evecs_np)
-
-    inv_sqrt_evals = 1.0 / ab.sqrt(ab.maximum(evals, 1e-12))
+    inv_sqrt_evals = 1.0 / np.sqrt(np.maximum(evals, 1e-12))
     gps = evecs * inv_sqrt_evals[None, :]
 
-    return ab.to_numpy(gps)
+    return gps
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -472,7 +461,6 @@ def spectral_feature_matrix(
     include_hks: bool = True,
     include_wks: bool = True,
     include_gps: bool = True,
-    backend: str = "scipy",
 ) -> np.ndarray:
     """
     Build a combined per-vertex spectral feature matrix.
@@ -487,30 +475,19 @@ def spectral_feature_matrix(
         Dimensionality of each descriptor block.
     include_hks, include_wks, include_gps : bool
         Which descriptors to include.
-    backend : str
-        Compute backend for dense operations. Descriptors are pure
-        GEMM and element-wise ops — GPU gives 10–30× speedup.
 
     Returns
     -------
     features : np.ndarray, shape (N, D)
         D = sum of included descriptor dimensions.
-
-    Examples
-    --------
-    >>> # CPU (default)
-    >>> features = spectral_feature_matrix(lb)
-
-    >>> # GPU via CuPy (10–30× faster for 150K vertices)
-    >>> features = spectral_feature_matrix(lb, backend="cupy")
     """
     blocks = []
     if include_hks:
-        blocks.append(heat_kernel_signature(lb, n_scales=hks_scales, backend=backend))
+        blocks.append(heat_kernel_signature(lb, n_scales=hks_scales))
     if include_wks:
-        blocks.append(wave_kernel_signature(lb, n_energies=wks_energies, backend=backend))
+        blocks.append(wave_kernel_signature(lb, n_energies=wks_energies))
     if include_gps:
-        blocks.append(global_point_signature(lb, n_components=gps_components, backend=backend))
+        blocks.append(global_point_signature(lb, n_components=gps_components))
 
     if not blocks:
         raise ValueError("At least one descriptor must be included.")
@@ -519,7 +496,7 @@ def spectral_feature_matrix(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Internals (kept for backward compatibility)
+# Internals
 # ═══════════════════════════════════════════════════════════════════════════
 
 
