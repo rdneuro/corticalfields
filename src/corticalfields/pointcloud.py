@@ -841,6 +841,10 @@ def compute_pointcloud_laplacian(
             "Install with: pip install robust-laplacian"
         )
 
+    # Accept CorticalPointCloud objects transparently
+    if isinstance(points, CorticalPointCloud):
+        points = points.points
+
     logger.info(
         "Computing point cloud Laplacian for %d points (k=%d)...",
         points.shape[0], n_neighbors,
@@ -903,6 +907,10 @@ def compute_pointcloud_eigenpairs(
     """
     from corticalfields.spectral import LaplaceBeltrami
     from corticalfields.backends import eigsh_solve, resolve_backend
+
+    # Accept CorticalPointCloud objects transparently
+    if isinstance(points, CorticalPointCloud):
+        points = points.points
 
     L, M = compute_pointcloud_laplacian(points, n_neighbors=n_neighbors)
 
