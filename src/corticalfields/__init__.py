@@ -46,9 +46,14 @@ graphs      : Cortical similarity network construction
 bayesian    : Bayesian statistical analysis (PyMC, ArviZ, PreliZ)
 bayes_viz   : Publication-quality Bayesian visualization (20 functions)
 viz         : Publication-quality surface visualization
+pointcloud  : Mesh-free point cloud cortical geometry (LBO on point clouds)
+functional_maps : Functional maps (C matrix) for cortical correspondence
+transport   : Optimal transport distances and kernels (Wasserstein, Sinkhorn)
+asymmetry   : Atlas-free cortical asymmetry quantification
+distance_stats : Distance-based statistical inference (MDMR, HSIC, Mantel, KRR)
 """
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 __author__ = "Debpna, R. (rdneuro)"
 
 # ── Lazy imports ────────────────────────────────────────────────────────
@@ -111,6 +116,38 @@ def __getattr__(name: str):
         "elicit_prior": ("corticalfields.bayesian", "elicit_prior"),
         "enigma_informed_prior": ("corticalfields.bayesian", "enigma_informed_prior"),
         "ENIGMA_EFFECT_SIZES": ("corticalfields.bayesian", "ENIGMA_EFFECT_SIZES"),
+        # pointcloud.py (mesh-free LBO — requires robust_laplacian)
+        "CorticalPointCloud": ("corticalfields.pointcloud", "CorticalPointCloud"),
+        "from_freesurfer_surface": ("corticalfields.pointcloud", "from_freesurfer_surface"),
+        "from_cortical_surface": ("corticalfields.pointcloud", "from_cortical_surface"),
+        "from_nifti_mask": ("corticalfields.pointcloud", "from_nifti_mask"),
+        "compute_pointcloud_eigenpairs": ("corticalfields.pointcloud", "compute_pointcloud_eigenpairs"),
+        # functional_maps.py (spectral correspondence)
+        "FunctionalMap": ("corticalfields.functional_maps", "FunctionalMap"),
+        "compute_functional_map": ("corticalfields.functional_maps", "compute_functional_map"),
+        "compute_interhemispheric_map": ("corticalfields.functional_maps", "compute_interhemispheric_map"),
+        "zoomout_refine": ("corticalfields.functional_maps", "zoomout_refine"),
+        "transfer_function": ("corticalfields.functional_maps", "transfer_function"),
+        # transport.py (optimal transport — requires POT)
+        "TransportResult": ("corticalfields.transport", "TransportResult"),
+        "sliced_wasserstein_distance": ("corticalfields.transport", "sliced_wasserstein_distance"),
+        "sinkhorn_divergence": ("corticalfields.transport", "sinkhorn_divergence"),
+        "pairwise_wasserstein_matrix": ("corticalfields.transport", "pairwise_wasserstein_matrix"),
+        "wasserstein_kernel": ("corticalfields.transport", "wasserstein_kernel"),
+        # asymmetry.py (atlas-free asymmetry)
+        "AsymmetryProfile": ("corticalfields.asymmetry", "AsymmetryProfile"),
+        "asymmetry_from_functional_map": ("corticalfields.asymmetry", "asymmetry_from_functional_map"),
+        "asymmetry_from_wasserstein": ("corticalfields.asymmetry", "asymmetry_from_wasserstein"),
+        "combined_asymmetry": ("corticalfields.asymmetry", "combined_asymmetry"),
+        "classical_asymmetry_index": ("corticalfields.asymmetry", "classical_asymmetry_index"),
+        # distance_stats.py (distance-based inference)
+        "StatisticalResult": ("corticalfields.distance_stats", "StatisticalResult"),
+        "mdmr": ("corticalfields.distance_stats", "mdmr"),
+        "hsic": ("corticalfields.distance_stats", "hsic"),
+        "distance_correlation": ("corticalfields.distance_stats", "distance_correlation"),
+        "mantel_test": ("corticalfields.distance_stats", "mantel_test"),
+        "kernel_ridge_regression": ("corticalfields.distance_stats", "kernel_ridge_regression"),
+        "outcome_kernel": ("corticalfields.distance_stats", "outcome_kernel"),
     }
     if name in _MAP:
         module_path, attr = _MAP[name]
@@ -150,4 +187,24 @@ __all__ = [
     "savage_dickey_bf", "shrinkage_metrics", "to_latex_table",
     # Bayesian analysis — prior elicitation
     "elicit_prior", "enigma_informed_prior", "ENIGMA_EFFECT_SIZES",
+    # Point cloud geometry (mesh-free)
+    "CorticalPointCloud",
+    "from_freesurfer_surface", "from_cortical_surface", "from_nifti_mask",
+    "compute_pointcloud_eigenpairs",
+    # Functional maps (spectral correspondence)
+    "FunctionalMap",
+    "compute_functional_map", "compute_interhemispheric_map",
+    "zoomout_refine", "transfer_function",
+    # Optimal transport
+    "TransportResult",
+    "sliced_wasserstein_distance", "sinkhorn_divergence",
+    "pairwise_wasserstein_matrix", "wasserstein_kernel",
+    # Asymmetry quantification
+    "AsymmetryProfile",
+    "asymmetry_from_functional_map", "asymmetry_from_wasserstein",
+    "combined_asymmetry", "classical_asymmetry_index",
+    # Distance-based statistical inference
+    "StatisticalResult",
+    "mdmr", "hsic", "distance_correlation", "mantel_test",
+    "kernel_ridge_regression", "outcome_kernel",
 ]
