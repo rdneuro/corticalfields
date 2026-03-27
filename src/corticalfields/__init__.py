@@ -27,8 +27,8 @@ viz         : Publication-quality surface visualization
 brainplots  : Publication-grade brain plots (surfaces, graphs, matrices, composites)
 """
 
-__version__ = "0.1.0"
-__author__ = "Velho Mago (rdneuro)"
+__version__ = "0.1.5"
+__author__ = "rdneuro"
 
 # ── Lazy imports ────────────────────────────────────────────────────────
 # Heavy dependencies (torch, gpytorch) are only loaded when the modules
