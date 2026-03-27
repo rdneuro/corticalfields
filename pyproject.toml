@@ -87,10 +87,8 @@ bayesian-gpu = [
 ]
 bayesian-all = [
     "corticalfields[bayesian]",
-    "nutpie>=0.9",
-    "numpyro>=0.14",
-    "blackjax>=1.0",
-    "jax[cuda13]>=0.4",
+    "corticalfields[bayesian-gpu]",
+    "corticalfields[bayesian-fast]",
 ]
 # LaPy Laplacian backend (Deep-MI group)
 lapy = [
@@ -136,7 +134,7 @@ all = [
     "corticalfields[viz]",
     "corticalfields[lapy-fast]",
     "corticalfields[igraph]",
-    "giotto-tda>=0.6",
+    "giotto-tda",
 ]
 
 # Development
