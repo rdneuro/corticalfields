@@ -534,6 +534,7 @@ def wasserstein_kernel(
     D: np.ndarray,
     gamma: Optional[float] = None,
     kernel_type: str = "gaussian",
+    backend: str = "numpy",
 ) -> np.ndarray:
     """
     Compute a positive-definite kernel from a Wasserstein distance matrix.
@@ -552,6 +553,8 @@ def wasserstein_kernel(
         γ = 1 / median(D²).
     kernel_type : ``'gaussian'`` or ``'laplacian'``
         Kernel function.
+    backend : ``'numpy'``, ``'torch'``, or ``'cupy'``
+        Compute backend. GPU backends are faster for large N.
 
     Returns
     -------
@@ -570,6 +573,12 @@ def wasserstein_kernel(
         else:
             gamma = 1.0
 
+    if backend == "torch":
+        return _wasserstein_kernel_torch(D, gamma, kernel_type)
+    elif backend == "cupy":
+        return _wasserstein_kernel_cupy(D, gamma, kernel_type)
+
+    # NumPy default
     if kernel_type == "gaussian":
         K = np.exp(-gamma * D ** 2)
     elif kernel_type == "laplacian":
@@ -728,3 +737,39 @@ def fugw_alignment(
             "radius": radius,
         },
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GPU-accelerated kernel computation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _wasserstein_kernel_torch(
+    D: np.ndarray, gamma: float, kernel_type: str,
+) -> np.ndarray:
+    """Compute Wasserstein kernel on GPU via PyTorch (element-wise exp)."""
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    D_t = torch.tensor(D, dtype=torch.float64, device=device)
+    if kernel_type == "gaussian":
+        K_t = torch.exp(-gamma * D_t ** 2)
+    elif kernel_type == "laplacian":
+        K_t = torch.exp(-gamma * D_t)
+    else:
+        raise ValueError(f"Unknown kernel type: {kernel_type!r}")
+    return K_t.cpu().numpy()
+
+
+def _wasserstein_kernel_cupy(
+    D: np.ndarray, gamma: float, kernel_type: str,
+) -> np.ndarray:
+    """Compute Wasserstein kernel on GPU via CuPy."""
+    import cupy as cp
+    D_c = cp.asarray(D)
+    if kernel_type == "gaussian":
+        K_c = cp.exp(-gamma * D_c ** 2)
+    elif kernel_type == "laplacian":
+        K_c = cp.exp(-gamma * D_c)
+    else:
+        raise ValueError(f"Unknown kernel type: {kernel_type!r}")
+    return cp.asnumpy(K_c)

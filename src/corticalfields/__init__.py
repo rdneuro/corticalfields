@@ -56,6 +56,11 @@ def __getattr__(name: str):
         "compute_surprise": ("corticalfields.surprise", "compute_surprise"),
         # features.py (lightweight)
         "MorphometricProfile": ("corticalfields.features", "MorphometricProfile"),
+        # pointcloud.py (FreeSurfer-free cortical extraction)
+        "from_t1w": ("corticalfields.pointcloud", "from_t1w"),
+        "T1wExtractionResult": ("corticalfields.pointcloud", "T1wExtractionResult"),
+        "compute_mesh_laplacian": ("corticalfields.pointcloud", "compute_mesh_laplacian"),
+        "compute_mesh_eigenpairs": ("corticalfields.pointcloud", "compute_mesh_eigenpairs"),
         # brainplots.py (publication-grade visualization — pyvista + matplotlib)
         "plot_surface_4view": ("corticalfields.brainplots", "plot_surface_4view"),
         "plot_surface_comparison": ("corticalfields.brainplots", "plot_surface_comparison"),
@@ -94,6 +99,9 @@ __all__ = [
     "CorticalNormativeModel",
     "SurpriseMap", "compute_surprise",
     "MorphometricProfile",
+    # FreeSurfer-free cortical extraction
+    "from_t1w", "T1wExtractionResult",
+    "compute_mesh_laplacian", "compute_mesh_eigenpairs",
     # Brain visualization (publication-grade)
     "plot_surface_4view", "plot_surface_comparison",
     "plot_surprise_brain", "plot_normative_result",

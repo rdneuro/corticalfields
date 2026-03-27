@@ -116,6 +116,7 @@ def mdmr(
     covariates: Optional[np.ndarray] = None,
     n_permutations: int = 10000,
     seed: int = 42,
+    backend: str = "numpy",
 ) -> StatisticalResult:
     """
     Multivariate Distance Matrix Regression (MDMR).
@@ -199,15 +200,15 @@ def mdmr(
     H_reduced = _hat_matrix(X_reduced)
     R_reduced = np.eye(N) - H_reduced
 
-    for perm in range(n_permutations):
-        # Permute residuals
-        perm_idx = rng.permutation(N)
-        # Freedman-Lane: permute residuals of reduced model, add back fitted
-        G_perm = R_reduced[perm_idx] @ G @ R_reduced[perm_idx].T
-        G_perm = H_reduced @ G @ H_reduced.T + G_perm  # Not exactly FL, simplified
-        # Actually, proper FL permutes the Gower matrix rows/cols
-        G_perm = G[np.ix_(perm_idx, perm_idx)]
-        null_F[perm], _ = _pseudo_f(G_perm, X_full, X_reduced)
+    if backend == "torch" and n_permutations >= 100:
+        null_F = _mdmr_permute_torch(G, X_full, X_reduced, n_permutations, seed)
+    elif backend == "cupy" and n_permutations >= 100:
+        null_F = _mdmr_permute_cupy(G, X_full, X_reduced, n_permutations, seed)
+    else:
+        for perm in range(n_permutations):
+            perm_idx = rng.permutation(N)
+            G_perm = G[np.ix_(perm_idx, perm_idx)]
+            null_F[perm], _ = _pseudo_f(G_perm, X_full, X_reduced)
 
     p_value = (np.sum(null_F >= F_obs) + 1) / (n_permutations + 1)
 
@@ -723,3 +724,104 @@ def _hsic_unbiased(K1: np.ndarray, K2: np.ndarray) -> float:
     term3 = 2 * (K1t.sum(axis=0) @ K2t.sum(axis=0)) / (N - 2)
 
     return float((term1 + term2 - term3) / (N * (N - 3)))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GPU-accelerated MDMR permutation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _mdmr_permute_torch(
+    G: np.ndarray,
+    X_full: np.ndarray,
+    X_reduced: np.ndarray,
+    n_permutations: int,
+    seed: int,
+) -> np.ndarray:
+    """
+    GPU-accelerated MDMR permutation via PyTorch.
+
+    Pre-computes the hat matrices on GPU and runs all permutations
+    with batched trace operations, avoiding the Python loop overhead.
+    """
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("  MDMR permutation on %s (%d perms)", device, n_permutations)
+
+    N = G.shape[0]
+    G_t = torch.tensor(G, dtype=torch.float64, device=device)
+
+    # Pre-compute hat matrices
+    X_f = torch.tensor(X_full, dtype=torch.float64, device=device)
+    X_r = torch.tensor(X_reduced, dtype=torch.float64, device=device)
+    Q_f, _ = torch.linalg.qr(X_f)
+    H_f = Q_f @ Q_f.T
+    Q_r, _ = torch.linalg.qr(X_r)
+    H_r = Q_r @ Q_r.T
+
+    df_model = X_full.shape[1] - X_reduced.shape[1]
+    df_residual = N - X_full.shape[1]
+
+    ss_total = torch.trace(G_t)
+
+    rng = np.random.default_rng(seed)
+    null_F = np.zeros(n_permutations, dtype=np.float64)
+
+    for perm in range(n_permutations):
+        idx = rng.permutation(N)
+        idx_t = torch.tensor(idx, dtype=torch.long, device=device)
+        G_p = G_t[idx_t][:, idx_t]
+
+        ss_full = torch.trace(H_f @ G_p @ H_f)
+        ss_reduced = torch.trace(H_r @ G_p @ H_r)
+        ss_model = ss_full - ss_reduced
+        ss_resid = ss_total - ss_full
+
+        if ss_resid > 1e-12 and df_model > 0 and df_residual > 0:
+            null_F[perm] = float((ss_model / df_model) / (ss_resid / df_residual))
+
+    return null_F
+
+
+def _mdmr_permute_cupy(
+    G: np.ndarray,
+    X_full: np.ndarray,
+    X_reduced: np.ndarray,
+    n_permutations: int,
+    seed: int,
+) -> np.ndarray:
+    """GPU-accelerated MDMR permutation via CuPy."""
+    import cupy as cp
+    logger.info("  MDMR permutation via CuPy (%d perms)", n_permutations)
+
+    N = G.shape[0]
+    G_c = cp.asarray(G)
+
+    X_f = cp.asarray(X_full)
+    X_r = cp.asarray(X_reduced)
+    Q_f, _ = cp.linalg.qr(X_f)
+    H_f = Q_f @ Q_f.T
+    Q_r, _ = cp.linalg.qr(X_r)
+    H_r = Q_r @ Q_r.T
+
+    df_model = X_full.shape[1] - X_reduced.shape[1]
+    df_residual = N - X_full.shape[1]
+
+    ss_total = float(cp.trace(G_c))
+
+    rng = np.random.default_rng(seed)
+    null_F = np.zeros(n_permutations, dtype=np.float64)
+
+    for perm in range(n_permutations):
+        idx = rng.permutation(N)
+        G_p = G_c[cp.ix_(cp.asarray(idx), cp.asarray(idx))]
+
+        ss_full = float(cp.trace(H_f @ G_p @ H_f))
+        ss_reduced = float(cp.trace(H_r @ G_p @ H_r))
+        ss_model = ss_full - ss_reduced
+        ss_resid = ss_total - ss_full
+
+        if ss_resid > 1e-12 and df_model > 0 and df_residual > 0:
+            null_F[perm] = (ss_model / df_model) / (ss_resid / df_residual)
+
+    return null_F

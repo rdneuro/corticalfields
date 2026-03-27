@@ -297,6 +297,7 @@ def compute_functional_map(
     alpha_orient: float = 0.0,
     A_source: Optional[np.ndarray] = None,
     A_target: Optional[np.ndarray] = None,
+    backend: str = "numpy",
 ) -> FunctionalMap:
     """
     Compute a functional map between two surfaces.
@@ -404,12 +405,17 @@ def compute_functional_map(
     rhs = alpha_desc * (A_t @ A_s.T)  # (k_tgt, k_src)
 
     # Solve row by row of C (each row i of C is independent due to diagonal structure)
-    C = np.zeros((k_tgt, k_src), dtype=np.float64)
-    for i in range(k_tgt):
-        # Row i: C[i,:] @ G + alpha_lap * ev_diff_sq[i,:] * C[i,:] = rhs[i,:]
-        # => C[i,:] @ (G + alpha_lap * diag(ev_diff_sq[i,:])) = rhs[i,:]
-        lhs = G + alpha_lap * np.diag(ev_diff_sq[i])
-        C[i] = np.linalg.solve(lhs, rhs[i])
+    # GPU backends: batch all k_tgt linear systems into a single batched solve
+    if backend == "torch":
+        C = _solve_functional_map_torch(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt, k_src)
+    elif backend == "cupy":
+        C = _solve_functional_map_cupy(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt, k_src)
+    else:
+        # NumPy fallback (row-by-row)
+        C = np.zeros((k_tgt, k_src), dtype=np.float64)
+        for i in range(k_tgt):
+            lhs = G + alpha_lap * np.diag(ev_diff_sq[i])
+            C[i] = np.linalg.solve(lhs, rhs[i])
 
     logger.info("  Initial C computed. Off-diagonal energy: %.4f",
                 _off_diagonal_frobenius(C))
@@ -630,6 +636,7 @@ def compute_interhemispheric_map(
     alpha_lap: float = 1e-3,
     zoomout: bool = True,
     n_zoomout_iters: int = 10,
+    backend: str = "numpy",
 ) -> FunctionalMap:
     """
     Compute an inter-hemispheric functional map.
@@ -672,6 +679,7 @@ def compute_interhemispheric_map(
         descriptor_type=descriptor_type,
         n_descriptors=n_descriptors,
         alpha_lap=alpha_lap,
+        backend=backend,
     )
 
     if zoomout and k_final > k:
@@ -845,3 +853,48 @@ def functional_map_distance(
         return float(theta)
     else:
         raise ValueError(f"Unknown metric: {metric!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GPU-accelerated solvers for functional map computation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _solve_functional_map_torch(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt, k_src):
+    """Batched linear solve on GPU via PyTorch (torch.linalg.solve)."""
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("  Functional map solve on %s via torch.linalg.solve", device)
+
+    G_t = torch.tensor(G, dtype=torch.float64, device=device)
+    rhs_t = torch.tensor(rhs, dtype=torch.float64, device=device)
+    ev_t = torch.tensor(ev_diff_sq, dtype=torch.float64, device=device)
+
+    # Build batch of (k_tgt, k_src, k_src) LHS matrices
+    # lhs[i] = G + alpha_lap * diag(ev_diff_sq[i])
+    diag_batch = torch.zeros(k_tgt, k_src, k_src, dtype=torch.float64, device=device)
+    idx = torch.arange(k_src, device=device)
+    diag_batch[:, idx, idx] = alpha_lap * ev_t
+    lhs_batch = G_t.unsqueeze(0).expand(k_tgt, -1, -1) + diag_batch
+
+    # Batched solve: lhs_batch @ C_rows = rhs
+    C_t = torch.linalg.solve(lhs_batch, rhs_t.unsqueeze(-1)).squeeze(-1)
+    return C_t.cpu().numpy()
+
+
+def _solve_functional_map_cupy(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt, k_src):
+    """Batched linear solve on GPU via CuPy."""
+    import cupy as cp
+    logger.info("  Functional map solve via CuPy batched solve")
+
+    G_c = cp.asarray(G)
+    rhs_c = cp.asarray(rhs)
+    ev_c = cp.asarray(ev_diff_sq)
+
+    C = cp.zeros((k_tgt, k_src), dtype=cp.float64)
+    for i in range(k_tgt):
+        lhs = G_c + alpha_lap * cp.diag(ev_c[i])
+        C[i] = cp.linalg.solve(lhs, rhs_c[i])
+
+    return cp.asnumpy(C)
+
