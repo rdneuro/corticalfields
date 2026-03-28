@@ -27,7 +27,7 @@ viz         : Publication-quality surface visualization
 brainplots  : Publication-grade brain plots (surfaces, graphs, matrices, composites)
 """
 
-__version__ = "0.1.5"
+__version__ = "0.1.7dev"
 __author__ = "rdneuro"
 
 # ── Lazy imports ────────────────────────────────────────────────────────
