@@ -227,7 +227,7 @@ def load_freesurfer_surface(
     subjects_dir: Union[str, Path],
     subject_id: str,
     hemi: str = "lh",
-    surface: str = "midthickness",
+    surface: str = "pial",
     overlays: Optional[List[str]] = None,
 ) -> CorticalSurface:
     """
@@ -242,10 +242,7 @@ def load_freesurfer_surface(
     hemi : ``'lh'`` or ``'rh'``
         Hemisphere.
     surface : str
-        Surface name: ``'midthickness'`` (default, recommended for LBO/HKS),
-        ``'pial'``, ``'white'``, ``'inflated'``, etc.
-        If ``'midthickness'`` is not found, attempts ``'graymid'``, then
-        auto-generates from white+pial average (HCP convention).
+        Surface name: ``'pial'``, ``'white'``, ``'inflated'``, etc.
     overlays : list[str] or None
         Overlay names to load (keys of ``FREESURFER_OVERLAYS``).
         If *None*, loads all available overlays.
@@ -267,34 +264,7 @@ def load_freesurfer_surface(
     base = Path(subjects_dir) / subject_id / "surf"
     surf_path = base / f"{hemi}.{surface}"
     if not surf_path.exists():
-        # Midthickness fallback chain
-        if surface in ("midthickness", "graymid"):
-            alt_name = "graymid" if surface == "midthickness" else "midthickness"
-            alt_path = base / f"{hemi}.{alt_name}"
-            if alt_path.exists():
-                surf_path = alt_path
-                surface = alt_name
-                logger.info("Using %s.%s (fallback)", hemi, alt_name)
-            else:
-                # Auto-generate from white + pial average (HCP convention)
-                white_path = base / f"{hemi}.white"
-                pial_path = base / f"{hemi}.pial"
-                if white_path.exists() and pial_path.exists():
-                    w_coords, w_faces = nib.freesurfer.read_geometry(str(white_path))
-                    p_coords, _ = nib.freesurfer.read_geometry(str(pial_path))
-                    mid_coords = (w_coords + p_coords) / 2.0
-                    nib.freesurfer.write_geometry(str(surf_path), mid_coords, w_faces)
-                    logger.info(
-                        "Auto-generated %s.midthickness from white+pial average",
-                        hemi,
-                    )
-                else:
-                    raise FileNotFoundError(
-                        f"Surface not found: {surf_path}. "
-                        f"Cannot auto-generate: need both {hemi}.white and {hemi}.pial"
-                    )
-        else:
-            raise FileNotFoundError(f"Surface not found: {surf_path}")
+        raise FileNotFoundError(f"Surface not found: {surf_path}")
 
     # nibabel reads FreeSurfer binary surfaces
     coords, faces = nib.freesurfer.read_geometry(str(surf_path))

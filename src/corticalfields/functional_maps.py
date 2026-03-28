@@ -448,6 +448,7 @@ def zoomout_refine(
     k_final: int = 200,
     n_iterations: int = 10,
     step: Optional[int] = None,
+    backend: str = "numpy",
 ) -> FunctionalMap:
     """
     Refine a functional map using the ZoomOut algorithm (Melzi et al., 2019).
@@ -687,6 +688,7 @@ def compute_interhemispheric_map(
             fm, lb_lh, lb_rh,
             k_final=k_final,
             n_iterations=n_zoomout_iters,
+            backend=backend,
         )
 
     fm.metadata["type"] = "interhemispheric"

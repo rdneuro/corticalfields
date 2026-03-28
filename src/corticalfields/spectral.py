@@ -204,6 +204,7 @@ def compute_eigenpairs(
     n_eigenpairs: int = 300,
     use_robust: bool = True,
     sigma: float = -0.01,
+    backend: str = "auto",
 ) -> LaplaceBeltrami:
     """
     Compute the leading eigenpairs of the LB operator on a mesh.
@@ -221,8 +222,12 @@ def compute_eigenpairs(
     use_robust : bool
         Prefer robust-laplacian if available.
     sigma : float
-        Shift-invert parameter for ``scipy.sparse.linalg.eigsh``.
+        Shift-invert parameter for the eigensolver.
         A small negative value targets the smallest eigenvalues.
+    backend : ``'auto'``, ``'scipy'``, ``'cupy'``, or ``'torch'``
+        Compute backend for the eigendecomposition.
+        ``'auto'`` selects cupy → torch → scipy in order of availability.
+        ``'cupy'`` is recommended (fastest, no CSR warnings).
 
     Returns
     -------
@@ -232,12 +237,14 @@ def compute_eigenpairs(
     Notes
     -----
     The generalised eigenproblem ``L φ = λ M φ`` is solved using
-    ARPACK's shift-invert mode (via ``eigsh``), which is efficient
-    for the smallest eigenvalues of large sparse systems.
+    ARPACK's shift-invert mode (via ``eigsh``) for scipy, or the
+    equivalent GPU-accelerated solver for cupy/torch backends.
 
     For a typical FreeSurfer mesh (~150k vertices), computing 300
-    eigenpairs takes 1–3 minutes on a modern CPU.
+    eigenpairs takes 1–3 minutes on CPU, ~30s on GPU (cupy).
     """
+    from corticalfields.backends import eigsh_solve, resolve_backend
+
     logger.info(
         "Computing %d LB eigenpairs for mesh with %d vertices…",
         n_eigenpairs, vertices.shape[0],
@@ -245,14 +252,14 @@ def compute_eigenpairs(
 
     L, M = compute_laplacian(vertices, faces, use_robust=use_robust)
 
-    # Solve generalised eigenvalue problem: L φ = λ M φ
-    # sigma < 0 ⟹ shift-invert near zero (target smallest eigenvalues)
-    eigenvalues, eigenvectors = eigsh(
-        L, k=n_eigenpairs, M=M, sigma=sigma, which="LM",
+    be = resolve_backend(backend)
+    logger.info("  Eigensolver backend: %s", be.value)
+
+    eigenvalues, eigenvectors = eigsh_solve(
+        L, M, k=n_eigenpairs, sigma=sigma, backend=be.value,
     )
 
-    # eigsh returns eigenvalues in increasing order for shift-invert
-    # but sort explicitly to be safe
+    # Sort explicitly to be safe
     order = np.argsort(eigenvalues)
     eigenvalues = eigenvalues[order]
     eigenvectors = eigenvectors[:, order]

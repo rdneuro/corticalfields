@@ -238,6 +238,7 @@ def hsic(
     n_permutations: int = 10000,
     seed: int = 42,
     unbiased: bool = True,
+    backend: str = "numpy",
 ) -> StatisticalResult:
     """
     Hilbert-Schmidt Independence Criterion (HSIC).
@@ -285,13 +286,46 @@ def hsic(
 
     # Permutation test
     null_hsic = np.zeros(n_permutations, dtype=np.float64)
-    for perm in range(n_permutations):
-        idx = rng.permutation(N)
-        K2_perm = K2[np.ix_(idx, idx)]
-        if unbiased:
-            null_hsic[perm] = _hsic_unbiased(K1, K2_perm)
-        else:
-            null_hsic[perm] = _hsic_biased(K1, K2_perm)
+
+    if backend == "cupy" and n_permutations >= 100:
+        try:
+            import cupy as cp
+            K1_c = cp.asarray(K1)
+            K2_c = cp.asarray(K2)
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                K2_p = K2_c[cp.ix_(cp.asarray(idx), cp.asarray(idx))]
+                null_hsic[perm] = float(_hsic_unbiased(cp.asnumpy(K1_c), cp.asnumpy(K2_p))
+                                        if unbiased else
+                                        _hsic_biased(cp.asnumpy(K1_c), cp.asnumpy(K2_p)))
+        except ImportError:
+            logger.warning("CuPy unavailable for HSIC; falling back to numpy")
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                K2_perm = K2[np.ix_(idx, idx)]
+                null_hsic[perm] = _hsic_unbiased(K1, K2_perm) if unbiased else _hsic_biased(K1, K2_perm)
+    elif backend == "torch" and n_permutations >= 100:
+        try:
+            import torch
+            dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            K2_t = torch.tensor(K2, dtype=torch.float64, device=dev)
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                idx_t = torch.tensor(idx, dtype=torch.long, device=dev)
+                K2_p = K2_t[idx_t][:, idx_t]
+                null_hsic[perm] = _hsic_unbiased(K1, K2_p.cpu().numpy()) if unbiased else _hsic_biased(K1, K2_p.cpu().numpy())
+        except ImportError:
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                null_hsic[perm] = _hsic_unbiased(K1, K2[np.ix_(idx, idx)]) if unbiased else _hsic_biased(K1, K2[np.ix_(idx, idx)])
+    else:
+        for perm in range(n_permutations):
+            idx = rng.permutation(N)
+            K2_perm = K2[np.ix_(idx, idx)]
+            if unbiased:
+                null_hsic[perm] = _hsic_unbiased(K1, K2_perm)
+            else:
+                null_hsic[perm] = _hsic_biased(K1, K2_perm)
 
     p_value = (np.sum(null_hsic >= hsic_obs) + 1) / (n_permutations + 1)
 
@@ -315,6 +349,7 @@ def distance_correlation(
     D2: np.ndarray,
     n_permutations: int = 10000,
     seed: int = 42,
+    backend: str = "numpy",
 ) -> StatisticalResult:
     """
     Distance correlation (Székely et al., 2007) between two distance matrices.
@@ -357,10 +392,41 @@ def distance_correlation(
 
     # Permutation test on dCov²
     null_dcov = np.zeros(n_permutations, dtype=np.float64)
-    for perm in range(n_permutations):
-        idx = rng.permutation(N)
-        B_perm = B[np.ix_(idx, idx)]
-        null_dcov[perm] = np.sum(A * B_perm) / (N * N)
+    if backend == "cupy" and n_permutations >= 100:
+        try:
+            import cupy as cp
+            A_c = cp.asarray(A)
+            B_c = cp.asarray(B)
+            N2 = N * N
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                B_p = B_c[cp.ix_(cp.asarray(idx), cp.asarray(idx))]
+                null_dcov[perm] = float(cp.sum(A_c * B_p) / N2)
+        except ImportError:
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                null_dcov[perm] = np.sum(A * B[np.ix_(idx, idx)]) / (N * N)
+    elif backend == "torch" and n_permutations >= 100:
+        try:
+            import torch
+            dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            A_t = torch.tensor(A, dtype=torch.float64, device=dev)
+            B_t = torch.tensor(B, dtype=torch.float64, device=dev)
+            N2 = N * N
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                idx_t = torch.tensor(idx, dtype=torch.long, device=dev)
+                B_p = B_t[idx_t][:, idx_t]
+                null_dcov[perm] = float(torch.sum(A_t * B_p) / N2)
+        except ImportError:
+            for perm in range(n_permutations):
+                idx = rng.permutation(N)
+                null_dcov[perm] = np.sum(A * B[np.ix_(idx, idx)]) / (N * N)
+    else:
+        for perm in range(n_permutations):
+            idx = rng.permutation(N)
+            B_perm = B[np.ix_(idx, idx)]
+            null_dcov[perm] = np.sum(A * B_perm) / (N * N)
 
     p_value = (np.sum(null_dcov >= dCov2) + 1) / (n_permutations + 1)
 
@@ -461,6 +527,7 @@ def kernel_ridge_regression(
     alpha_range: Optional[np.ndarray] = None,
     n_folds: int = 5,
     seed: int = 42,
+    backend: str = "numpy",
 ) -> Dict[str, Union[float, np.ndarray]]:
     """
     Kernel Ridge Regression with cross-validated regularisation.
