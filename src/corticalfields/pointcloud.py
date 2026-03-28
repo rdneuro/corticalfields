@@ -197,7 +197,7 @@ def from_freesurfer_surface(
     subjects_dir: Union[str, Path],
     subject_id: str,
     hemi: str = "lh",
-    surface: str = "pial",
+    surface: str = "midthickness",
     overlays: Optional[List[str]] = None,
 ) -> CorticalPointCloud:
     """

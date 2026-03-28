@@ -61,6 +61,15 @@ def __getattr__(name: str):
         "T1wExtractionResult": ("corticalfields.pointcloud", "T1wExtractionResult"),
         "compute_mesh_laplacian": ("corticalfields.pointcloud", "compute_mesh_laplacian"),
         "compute_mesh_eigenpairs": ("corticalfields.pointcloud", "compute_mesh_eigenpairs"),
+        # eda_qc.py (EDA, QC, outlier detection)
+        "run_clinical_eda": ("corticalfields.eda_qc", "run_clinical_eda"),
+        "run_spectral_eda": ("corticalfields.eda_qc", "run_spectral_eda"),
+        "detect_clinical_outliers": ("corticalfields.eda_qc", "detect_clinical_outliers"),
+        "mcd_mahalanobis_outliers": ("corticalfields.eda_qc", "mcd_mahalanobis_outliers"),
+        "distance_matrix_outliers": ("corticalfields.eda_qc", "distance_matrix_outliers"),
+        "generate_midthickness": ("corticalfields.eda_qc", "generate_midthickness"),
+        "QCReport": ("corticalfields.eda_qc", "QCReport"),
+        "EDAResult": ("corticalfields.eda_qc", "EDAResult"),
         # brainplots.py (publication-grade visualization — pyvista + matplotlib)
         "plot_surface_4view": ("corticalfields.brainplots", "plot_surface_4view"),
         "plot_surface_comparison": ("corticalfields.brainplots", "plot_surface_comparison"),
@@ -102,6 +111,11 @@ __all__ = [
     # FreeSurfer-free cortical extraction
     "from_t1w", "T1wExtractionResult",
     "compute_mesh_laplacian", "compute_mesh_eigenpairs",
+    # EDA, QC, outlier detection
+    "run_clinical_eda", "run_spectral_eda",
+    "detect_clinical_outliers", "mcd_mahalanobis_outliers",
+    "distance_matrix_outliers", "generate_midthickness",
+    "QCReport", "EDAResult",
     # Brain visualization (publication-grade)
     "plot_surface_4view", "plot_surface_comparison",
     "plot_surprise_brain", "plot_normative_result",
