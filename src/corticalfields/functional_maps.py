@@ -471,6 +471,8 @@ def zoomout_refine(
         Number of refinement iterations.
     step : int or None
         Increment per iteration. If None, computed automatically.
+    backend : str
+        ``'cupy'``, ``'torch'``, or ``'numpy'``.
 
     Returns
     -------
@@ -484,49 +486,115 @@ def zoomout_refine(
         step = max(1, (k_max - k_init) // n_iterations)
 
     logger.info(
-        "ZoomOut refinement: k=%d → %d (step=%d, %d iterations)",
-        k_init, k_max, step, n_iterations,
+        "ZoomOut refinement: k=%d → %d (step=%d, %d iterations, backend=%s)",
+        k_init, k_max, step, n_iterations, backend,
     )
 
     C = fm.C.copy()
-    phi_src = lb_source.eigenvectors
-    phi_tgt = lb_target.eigenvectors
-    M_tgt = lb_target.mass
+    phi_src = lb_source.eigenvectors   # (N_src, K)
+    phi_tgt = lb_target.eigenvectors   # (N_tgt, K)
 
+    # Check if mass is identity (from lb_from_cache) — skip multiply
+    M_tgt = lb_target.mass
+    _mass_is_identity = False
+    if M_tgt is not None:
+        import scipy.sparse as _sp
+        if _sp.issparse(M_tgt):
+            diag = M_tgt.diagonal()
+            if np.allclose(diag, 1.0) and M_tgt.nnz == M_tgt.shape[0]:
+                _mass_is_identity = True
+
+    # ── GPU path (CuPy) ──────────────────────────────────────────────
+    if backend == "cupy":
+        try:
+            import cupy as cp
+            phi_src_g = cp.asarray(phi_src, dtype=cp.float32)
+            phi_tgt_g = cp.asarray(phi_tgt, dtype=cp.float32)
+            C_g = cp.asarray(C, dtype=cp.float32)
+
+            for it in range(n_iterations):
+                k_current = min(k_init + (it + 1) * step, k_max)
+                k_old_tgt = C_g.shape[0]
+                k_old_src = C_g.shape[1]
+
+                # 1. Spectral embeddings
+                emb_tgt = cp.asnumpy(phi_tgt_g[:, :k_old_tgt] @ C_g)
+                emb_src = cp.asnumpy(phi_src_g[:, :k_old_src])
+
+                # 2. GPU nearest-neighbour
+                p2p = _nearest_neighbour_map(emb_tgt, emb_src,
+                                             chunk_size=8192, backend="cupy")
+
+                # 3. Pull-back + Procrustes on GPU
+                phi_src_k = phi_src_g[:, :k_current]
+                phi_tgt_k = phi_tgt_g[:, :k_current]
+                phi_src_pulled = phi_src_k[cp.asarray(p2p)]  # (N_tgt, k_current)
+
+                if _mass_is_identity or M_tgt is None:
+                    C_g = phi_tgt_k.T @ phi_src_pulled
+                else:
+                    # Sparse mass multiply on CPU, rest on GPU
+                    M_phi = cp.asarray((M_tgt @ phi_tgt[:, :k_current]).astype(np.float32))
+                    C_g = M_phi.T @ phi_src_pulled
+
+                # SVD for nearest orthogonal (Procrustes)
+                U, _, Vt = cp.linalg.svd(C_g, full_matrices=False)
+                C_g = U @ Vt
+
+                logger.info("  ZoomOut iter %d/%d: k=%d, off-diag=%.4f",
+                            it + 1, n_iterations, k_current,
+                            _off_diagonal_frobenius(cp.asnumpy(C_g)))
+
+            C = cp.asnumpy(C_g).astype(np.float64)
+            del phi_src_g, phi_tgt_g, C_g
+            cp.get_default_memory_pool().free_all_blocks()
+
+            return FunctionalMap(
+                C=C,
+                k_source=k_current,
+                k_target=k_current,
+                source_eigenvalues=lb_source.eigenvalues[:k_current],
+                target_eigenvalues=lb_target.eigenvalues[:k_current],
+                metadata={
+                    **fm.metadata,
+                    "refinement": "zoomout",
+                    "k_init": k_init,
+                    "k_final": k_current,
+                    "n_iterations": n_iterations,
+                    "backend": "cupy",
+                },
+            )
+        except Exception as e:
+            logger.warning("CuPy ZoomOut failed (%s) — falling back to CPU", e)
+
+    # ── CPU path ─────────────────────────────────────────────────────
     for it in range(n_iterations):
         k_current = min(k_init + (it + 1) * step, k_max)
-
-        # 1. Convert C to pointwise map via nearest-neighbour
-        #    Project target vertices into source basis: φ_tgt[:, :k] @ C → (N, k_src)
         k_old_tgt = C.shape[0]
         k_old_src = C.shape[1]
-        emb_tgt = phi_tgt[:, :k_old_tgt] @ C  # (N_tgt, k_old_src)
-        emb_src = phi_src[:, :k_old_src]       # (N_src, k_old_src)
 
-        # Nearest neighbour: for each target vertex, find closest source vertex
-        # Use chunked computation to avoid memory issues
-        p2p = _nearest_neighbour_map(emb_tgt, emb_src, chunk_size=5000)
+        emb_tgt = phi_tgt[:, :k_old_tgt] @ C
+        emb_src = phi_src[:, :k_old_src]
 
-        # 2. Re-estimate C at higher resolution via Procrustes
-        phi_src_k = phi_src[:, :k_current]  # (N_src, k_current)
-        phi_tgt_k = phi_tgt[:, :k_current]  # (N_tgt, k_current)
+        p2p = _nearest_neighbour_map(emb_tgt, emb_src, chunk_size=5000,
+                                     backend=backend)
 
-        # Pull-back: select source basis rows according to p2p map
-        phi_src_pulled = phi_src_k[p2p]  # (N_tgt, k_current)
+        phi_src_k = phi_src[:, :k_current]
+        phi_tgt_k = phi_tgt[:, :k_current]
+        phi_src_pulled = phi_src_k[p2p]
 
-        # Weighted least-squares: C_new = (φ_tgt^T M φ_src_pulled)
-        if M_tgt is not None:
-            M_phi_tgt = M_tgt @ phi_tgt_k  # (N_tgt, k_current)
+        if _mass_is_identity or M_tgt is None:
+            C = phi_tgt_k.T @ phi_src_pulled
         else:
-            M_phi_tgt = phi_tgt_k
-        C = M_phi_tgt.T @ phi_src_pulled  # (k_current, k_current)
+            M_phi_tgt = M_tgt @ phi_tgt_k
+            C = M_phi_tgt.T @ phi_src_pulled
 
-        # Nearest orthogonal matrix (ICP-style)
         U, _, Vt = np.linalg.svd(C, full_matrices=False)
         C = U @ Vt
 
-        logger.debug("  ZoomOut iter %d: k=%d, off-diag=%.4f",
-                      it + 1, k_current, _off_diagonal_frobenius(C))
+        logger.info("  ZoomOut iter %d/%d: k=%d, off-diag=%.4f",
+                     it + 1, n_iterations, k_current,
+                     _off_diagonal_frobenius(C))
 
     return FunctionalMap(
         C=C,
@@ -772,11 +840,10 @@ def _nearest_neighbour_map(
     emb_target: np.ndarray,
     emb_source: np.ndarray,
     chunk_size: int = 5000,
+    backend: str = "numpy",
 ) -> np.ndarray:
     """
     Compute nearest-neighbour map from target to source embeddings.
-
-    Uses chunked computation to handle large point sets.
 
     Parameters
     ----------
@@ -784,23 +851,62 @@ def _nearest_neighbour_map(
     emb_source : np.ndarray, shape (N_src, D)
     chunk_size : int
         Process this many target points at once.
+    backend : str
+        ``'cupy'``, ``'torch'``, or ``'numpy'``.
+        GPU brute-force is much faster than KDTree in high dimensions.
 
     Returns
     -------
     p2p : np.ndarray, shape (N_tgt,)
         Source index for each target point.
     """
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(emb_source)
     N = emb_target.shape[0]
-    p2p = np.zeros(N, dtype=np.int64)
 
+    # ── GPU brute-force NN (fast in high-D) ──────────────────────────
+    if backend == "cupy":
+        try:
+            import cupy as cp
+            src = cp.asarray(emb_source, dtype=cp.float32)
+            src_sq = cp.sum(src ** 2, axis=1)          # (N_src,)
+            p2p = np.empty(N, dtype=np.int64)
+            for start in range(0, N, chunk_size):
+                end = min(start + chunk_size, N)
+                tgt = cp.asarray(emb_target[start:end], dtype=cp.float32)
+                # ||t - s||² = ||t||² + ||s||² - 2·t·sᵀ
+                dist = cp.sum(tgt ** 2, axis=1, keepdims=True) + src_sq[None, :] - 2 * tgt @ src.T
+                p2p[start:end] = cp.asnumpy(cp.argmin(dist, axis=1))
+                del tgt, dist
+            del src, src_sq
+            return p2p
+        except ImportError:
+            logger.warning("CuPy unavailable for NN — falling back to CPU")
+
+    if backend == "torch":
+        try:
+            import torch
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            src = torch.tensor(emb_source, dtype=torch.float32, device=device)
+            src_sq = torch.sum(src ** 2, dim=1)
+            p2p = np.empty(N, dtype=np.int64)
+            for start in range(0, N, chunk_size):
+                end = min(start + chunk_size, N)
+                tgt = torch.tensor(emb_target[start:end], dtype=torch.float32, device=device)
+                dist = torch.sum(tgt ** 2, dim=1, keepdim=True) + src_sq.unsqueeze(0) - 2 * tgt @ src.T
+                p2p[start:end] = torch.argmin(dist, dim=1).cpu().numpy()
+                del tgt, dist
+            del src, src_sq
+            return p2p
+        except ImportError:
+            logger.warning("PyTorch unavailable for NN — falling back to CPU")
+
+    # ── CPU fallback: KDTree ─────────────────────────────────────────
+    from scipy.spatial import cKDTree
+    tree = cKDTree(emb_source)
+    p2p = np.zeros(N, dtype=np.int64)
     for start in range(0, N, chunk_size):
         end = min(start + chunk_size, N)
         _, idx = tree.query(emb_target[start:end])
         p2p[start:end] = idx
-
     return p2p
 
 
