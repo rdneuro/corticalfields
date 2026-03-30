@@ -1,14 +1,14 @@
 """
-CorticalFields — Geodesic-aware GP normative modeling on cortical surfaces.
+CorticalFields — Spectral shape analysis on cortical and subcortical surfaces.
 
-A library for computing information-theoretic surprise maps on the cortical
-manifold using spectral Matérn Gaussian Processes, Heat Kernel Signatures,
-and Laplace–Beltrami spectral analysis. Designed for structural MRI (T1w)
+A library for computing spectral shape descriptors (HKS, WKS, GPS),
+functional maps, optimal-transport distances, and information-theoretic
+surprise maps on brain surface meshes.  Designed for structural MRI (T1w)
 data in clinical neuroimaging, with emphasis on epilepsy (MTLE-HS).
 
 Core pipeline:
-    1. Load FreeSurfer surfaces and morphometric overlays
-    2. Compute Laplace–Beltrami eigenpairs on the cortical mesh
+    1. Load FreeSurfer surfaces / subcortical volumes / HippUnfold meshes
+    2. Compute Laplace–Beltrami eigenpairs on the surface mesh
     3. Extract spectral shape descriptors (HKS, WKS, GPS)
     4. Build spectral Matérn GP kernels on the manifold
     5. Fit normative models on a reference cohort
@@ -16,15 +16,17 @@ Core pipeline:
 
 Modules
 -------
-surface     : Surface I/O — FreeSurfer, GIfTI, mesh utilities
-spectral    : Laplace–Beltrami decomposition, HKS, WKS, GPS
-kernels     : Spectral Matérn kernels for GPyTorch
-normative   : GP-based normative modeling pipeline
-surprise    : Information-theoretic anomaly scoring
-features    : Morphometric feature extraction from FreeSurfer
-graphs      : Cortical similarity network construction
-viz         : Publication-quality surface visualization
-brainplots  : Publication-grade brain plots (surfaces, graphs, matrices, composites)
+surface      : Surface I/O — FreeSurfer, GIfTI, mesh utilities
+subcortical  : Subcortical surface extraction (aseg, hippocampal subfields,
+               HippUnfold) and closed-surface spectral analysis
+spectral     : Laplace–Beltrami decomposition, HKS, WKS, GPS
+kernels      : Spectral Matérn kernels for GPyTorch
+normative    : GP-based normative modeling pipeline
+surprise     : Information-theoretic anomaly scoring
+features     : Morphometric feature extraction from FreeSurfer
+graphs       : Cortical similarity network construction
+viz          : Publication-quality surface visualization
+brainplots   : Publication-grade brain plots (surfaces, graphs, matrices, composites)
 """
 
 __version__ = "0.1.5"
@@ -70,6 +72,14 @@ def __getattr__(name: str):
         "generate_midthickness": ("corticalfields.eda_qc", "generate_midthickness"),
         "QCReport": ("corticalfields.eda_qc", "QCReport"),
         "EDAResult": ("corticalfields.eda_qc", "EDAResult"),
+        # subcortical.py (subcortical surface extraction + spectral pipeline)
+        "SubcorticalSurface": ("corticalfields.subcortical", "SubcorticalSurface"),
+        "load_subcortical_surface": ("corticalfields.subcortical", "load_subcortical_surface"),
+        "load_subcortical_from_nifti": ("corticalfields.subcortical", "load_subcortical_from_nifti"),
+        "subcortical_spectral_analysis": ("corticalfields.subcortical", "subcortical_spectral_analysis"),
+        "FS_ASEG_LABELS": ("corticalfields.subcortical", "FS_ASEG_LABELS"),
+        # utils.py additions
+        "estimate_n_eigenpairs": ("corticalfields.utils", "estimate_n_eigenpairs"),
         # brainplots.py (publication-grade visualization — pyvista + matplotlib)
         "plot_surface_4view": ("corticalfields.brainplots", "plot_surface_4view"),
         "plot_surface_comparison": ("corticalfields.brainplots", "plot_surface_comparison"),
@@ -116,6 +126,10 @@ __all__ = [
     "detect_clinical_outliers", "mcd_mahalanobis_outliers",
     "distance_matrix_outliers", "generate_midthickness",
     "QCReport", "EDAResult",
+    # Subcortical surface extraction + spectral pipeline
+    "SubcorticalSurface", "load_subcortical_surface",
+    "load_subcortical_from_nifti", "subcortical_spectral_analysis",
+    "FS_ASEG_LABELS", "estimate_n_eigenpairs",
     # Brain visualization (publication-grade)
     "plot_surface_4view", "plot_surface_comparison",
     "plot_surprise_brain", "plot_normative_result",
