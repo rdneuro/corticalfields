@@ -134,7 +134,7 @@ all = [
     "corticalfields[viz]",
     "corticalfields[lapy-fast]",
     "corticalfields[igraph]",
-    "giotto-tda",
+#    "giotto-tda",
 ]
 
 # Development
