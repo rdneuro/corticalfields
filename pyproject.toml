@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corticalfields"
-version = "0.1.6b"
+version = "0.1.7"
 description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors, Bayesian analysis, and information-theoretic surprise maps."
 readme = "README.md"
 license = {text = "MIT"}
@@ -107,7 +107,7 @@ igraph = [
 
 # CuPy GPU backend for spectral descriptors
 cuda = [
-    "cupy-cuda12x>=13.0",
+    "cupy-cuda13x",
 ]
 
 # Brain surface visualization
