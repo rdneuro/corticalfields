@@ -27,9 +27,10 @@ features     : Morphometric feature extraction from FreeSurfer
 graphs       : Cortical similarity network construction
 viz          : Publication-quality surface visualization
 brainplots   : Publication-grade brain plots (surfaces, graphs, matrices, composites)
+datasets     : Toy dataset download from Zenodo (fetch_toy_dataset)
 """
 
-__version__ = "0.1.7"
+__version__ = "0.1.6"
 __author__ = "rdneuro"
 
 # ── Lazy imports ────────────────────────────────────────────────────────
@@ -101,6 +102,11 @@ def __getattr__(name: str):
         "plot_subcortical_3d": ("corticalfields.brainplots", "plot_subcortical_3d"),
         "plot_composite_figure": ("corticalfields.brainplots", "plot_composite_figure"),
         "save_figure": ("corticalfields.brainplots", "save_figure"),
+        # datasets.py (toy dataset download — lightweight, stdlib only)
+        "fetch_toy_dataset": ("corticalfields.datasets", "fetch_toy_dataset"),
+        "clear_toy_dataset": ("corticalfields.datasets", "clear_toy_dataset"),
+        "load_example_surface": ("corticalfields.datasets", "load_example_surface"),
+        "ToyDataset": ("corticalfields.datasets", "ToyDataset"),
     }
     if name in _MAP:
         module_path, attr = _MAP[name]
@@ -141,4 +147,7 @@ __all__ = [
     "plot_network_graph", "plot_asymmetry_bands",
     "plot_krr_diagnostic", "plot_subcortical_3d",
     "plot_composite_figure", "save_figure",
+    # Toy dataset download
+    "fetch_toy_dataset", "clear_toy_dataset",
+    "load_example_surface", "ToyDataset",
 ]
