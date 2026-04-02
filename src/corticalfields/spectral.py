@@ -86,28 +86,39 @@ class LaplaceBeltrami:
 
     Parameters
     ----------
-    stiffness : scipy.sparse.csc_matrix, shape (N, N)
-        Cotangent stiffness matrix L.
-    mass : scipy.sparse.csc_matrix, shape (N, N)
-        Lumped (diagonal) mass matrix M.
+    stiffness : scipy.sparse.csc_matrix or None, shape (N, N)
+        Cotangent stiffness matrix L.  May be ``None`` when loading
+        from a cache that stored only eigenvalues/eigenvectors.
+    mass : scipy.sparse.csc_matrix or None, shape (N, N)
+        Lumped (diagonal) mass matrix M.  May be ``None`` when loading
+        from cache.  Some downstream operations (proper L² projection
+        in functional maps) require mass; if unavailable, uniform
+        weighting is used as fallback.
     eigenvalues : np.ndarray, shape (K,)
         Leading eigenvalues λ_0 ≤ λ_1 ≤ … ≤ λ_{K-1}.
     eigenvectors : np.ndarray, shape (N, K)
         Corresponding M-orthonormal eigenvectors.
     """
 
-    stiffness: sp.csc_matrix
-    mass: sp.csc_matrix
+    stiffness: Optional[sp.csc_matrix]
+    mass: Optional[sp.csc_matrix]
     eigenvalues: np.ndarray
     eigenvectors: np.ndarray
 
     @property
     def n_vertices(self) -> int:
-        return self.stiffness.shape[0]
+        """Number of mesh vertices (rows of the eigenvector matrix)."""
+        return self.eigenvectors.shape[0]
 
     @property
     def n_eigenpairs(self) -> int:
+        """Number of computed eigenpairs."""
         return len(self.eigenvalues)
+
+    @property
+    def has_matrices(self) -> bool:
+        """Whether stiffness (L) and mass (M) matrices are available."""
+        return self.stiffness is not None and self.mass is not None
 
 
 def compute_laplacian(
