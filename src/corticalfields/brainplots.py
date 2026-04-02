@@ -2168,3 +2168,279 @@ def plot_composite_figure(
     if output_path:
         save_figure(fig, output_path, dpi=dpi)
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BrainSpace-style lateral + medial surface rendering
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── PyVista camera presets for plot_brain_views ───────────────────────
+_PV_BRAIN_CAMERAS = {
+    "lateral_lh":   [(-_D, 0, 0), (0, 0, 0), (0, 0, 1)],
+    "medial_lh":    [( _D, 0, 0), (0, 0, 0), (0, 0, 1)],
+    "lateral_rh":   [( _D, 0, 0), (0, 0, 0), (0, 0, 1)],
+    "medial_rh":    [(-_D, 0, 0), (0, 0, 0), (0, 0, 1)],
+    "dorsal":       [(0, 0,  _D), (0, 0, 0), (0, 1, 0)],
+    "ventral":      [(0, 0, -_D), (0, 0, 0), (0, 1, 0)],
+    "anterior":     [(0,  _D, 0), (0, 0, 0), (0, 0, 1)],
+    "posterior":    [(0, -_D, 0), (0, 0, 0), (0, 0, 1)],
+    "superior":     [(0, 0,  _D), (0, 0, 0), (0, 1, 0)],
+}
+
+_PV_BRAIN_VIEW_PRESETS = {
+    "lateral+medial_lh": ["lateral_lh", "medial_lh"],
+    "lateral+medial_rh": ["lateral_rh", "medial_rh"],
+    "brainspace_lh":     ["lateral_lh", "medial_lh"],
+    "brainspace_rh":     ["lateral_rh", "medial_rh"],
+    "brainspace_both":   ["lateral_lh", "medial_lh", "medial_rh", "lateral_rh"],
+    "4view_lh":          ["lateral_lh", "medial_lh", "dorsal", "ventral"],
+    "4view_rh":          ["lateral_rh", "medial_rh", "dorsal", "ventral"],
+}
+
+
+def plot_brain_views(
+    subjects_dir: Union[str, Path],
+    subject_id: str,
+    scalars: np.ndarray,
+    *,
+    hemi: str = "lh",
+    surface: str = "inflated",
+    views: Optional[Union[str, List[str]]] = None,
+    curvature: Optional[np.ndarray] = None,
+    auto_curv: bool = True,
+    cmap: str = "RdBu_r",
+    clim: Optional[Tuple[float, float]] = None,
+    symmetric: bool = True,
+    threshold: Optional[float] = None,
+    cbar_label: str = "",
+    title: str = "",
+    view_labels: bool = True,
+    window_size: Tuple[int, int] = (800, 700),
+    figsize: Optional[Tuple[float, float]] = None,
+    journal: str = "nature",
+    dpi: int = 300,
+    output_path: Optional[Union[str, Path]] = None,
+) -> Figure:
+    """
+    BrainSpace-style lateral + medial brain surface rendering.
+
+    Renders a hemisphere (or both) on the **inflated** surface (default)
+    with a curvature underlay that produces the signature BrainSpace
+    appearance: dark sulci, light gyri.  A scalar overlay is mapped
+    in colour on top.
+
+    Uses PyVista with three-point lighting, PBR shading, and SSAO for
+    sulcal contrast.  The result is composited into a clean matplotlib
+    figure with a shared colour bar.
+
+    The visual output matches the canonical layout of ``plot_hemispheres``
+    from BrainSpace (Vos de Wael et al., Communications Biology 2020)
+    and HCP publications, but requires **only PyVista** — no external
+    BrainSpace dependency.
+
+    Parameters
+    ----------
+    subjects_dir : str or Path
+        FreeSurfer SUBJECTS_DIR (the FS_OUT root).
+    subject_id : str
+        Subject folder name (e.g. ``'sub-01'``).
+    scalars : ndarray (N,)
+        Per-vertex values to overlay.  Must match the vertex count of
+        the loaded surface.  Typical inputs: eigenfunction φ_k,
+        HKS/WKS at a given scale, z-score, surprise, asymmetry.
+    hemi : ``'lh'`` | ``'rh'``
+        Hemisphere to render.
+    surface : str
+        FreeSurfer surface file to load.  Default ``'inflated'`` —
+        reveals sulci while preserving spatial relationships.  Options:
+        ``'pial'`` (outer cortical boundary), ``'white'`` (inner),
+        ``'sphere'``, ``'midthickness'`` (HCP standard), or any
+        custom surface name present in ``surf/``.
+    views : str | list[str] | None
+        Camera views.  Presets (recommended):
+
+        - ``'lateral+medial_lh'`` — 2 panels (default for LH)
+        - ``'lateral+medial_rh'`` — 2 panels (default for RH)
+        - ``'brainspace_both'``   — 4 panels: lat-L, med-L, med-R, lat-R
+        - ``'4view_lh'``          — lat, med, dorsal, ventral
+
+        Individual: ``'lateral_lh'``, ``'medial_lh'``, ``'dorsal'``,
+        ``'ventral'``, ``'anterior'``, ``'posterior'``, ``'superior'``.
+    curvature : ndarray (N,) or None
+        Sulcal curvature for the underlay.  If ``None`` and
+        ``auto_curv=True``, loads ``{hemi}.curv`` from the subject's
+        FreeSurfer directory.
+    auto_curv : bool
+        Auto-load curvature when not provided.
+    cmap : str
+        Colourmap for the scalar overlay.
+    clim : (vmin, vmax) | None
+        Colour limits.  ``None`` → auto from data percentiles.
+    symmetric : bool
+        Centre colourbar at zero (for z-scores, eigenvectors, etc.).
+    threshold : float or None
+        Vertices with ``|scalar| < threshold`` become transparent.
+    cbar_label : str
+        Colour-bar label.
+    title : str
+        Figure super-title.
+    view_labels : bool
+        Show view-name labels below each panel.
+    window_size : (w, h)
+        PyVista render resolution in pixels per view.
+    figsize : (w, h) | None
+        Matplotlib figure size.  ``None`` → auto for target journal.
+    journal : str
+        Target journal for sizing: ``'nature'``, ``'brain'``, etc.
+    dpi : int
+        Output DPI.
+    output_path : str | Path | None
+        If provided, saves the figure.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Composited figure with PyVista screenshots.
+
+    Examples
+    --------
+    Eigenfunction φ₅ on inflated, lateral + medial::
+
+        fig = plot_brain_views(
+            ds.fs_dir, "sub-01", lb.eigenvectors[:, 5],
+            hemi="lh", surface="inflated",
+            cmap="RdBu_r", symmetric=True,
+            title="φ₅", cbar_label="amplitude",
+        )
+
+    HKS scale 8 on pial surface::
+
+        fig = plot_brain_views(
+            ds.fs_dir, "sub-01", hks[:, 8],
+            surface="pial", cmap="inferno", symmetric=False,
+            title="HKS (scale 8)", cbar_label="HKS",
+        )
+
+    BrainSpace-style 4 views with threshold::
+
+        fig = plot_brain_views(
+            ds.fs_dir, "sub-01", z_scores,
+            views="brainspace_both", threshold=2.0,
+            cmap="RdBu_r", symmetric=True,
+            title="Normative z-scores", cbar_label="z",
+            output_path="surprise.png",
+        )
+
+    Notes
+    -----
+    Requires **PyVista** (``pip install pyvista``).  On headless servers:
+    ``xvfb-run python script.py`` or ``pyvista.OFF_SCREEN = True``.
+    """
+    from corticalfields.surface import load_freesurfer_surface
+
+    _setup_style(journal)
+    subjects_dir = Path(subjects_dir)
+
+    # ── Load the rendering surface ────────────────────────────────────
+    surf = load_freesurfer_surface(
+        str(subjects_dir), subject_id,
+        hemi=hemi, surface=surface, overlays=[],
+    )
+    mesh = _make_pv_mesh(surf.vertices, surf.faces)
+
+    # ── Auto-load sulcal curvature ────────────────────────────────────
+    if curvature is None and auto_curv:
+        try:
+            import nibabel as nib
+            curv_path = subjects_dir / subject_id / "surf" / f"{hemi}.curv"
+            if curv_path.exists():
+                curvature = nib.freesurfer.read_morph_data(str(curv_path))
+                logger.info("Auto-loaded curvature: %s", curv_path)
+        except Exception as exc:
+            logger.debug("Could not auto-load curvature: %s", exc)
+
+    # ── Resolve views ─────────────────────────────────────────────────
+    if views is None:
+        views = f"lateral+medial_{hemi}"
+    if isinstance(views, str):
+        if views in _PV_BRAIN_VIEW_PRESETS:
+            views = _PV_BRAIN_VIEW_PRESETS[views]
+        elif views in _PV_BRAIN_CAMERAS:
+            views = [views]
+        else:
+            raise ValueError(
+                f"Unknown view: {views!r}.  Available: "
+                f"{sorted(list(_PV_BRAIN_CAMERAS) + list(_PV_BRAIN_VIEW_PRESETS))}"
+            )
+    n_views = len(views)
+
+    # ── Colour limits ─────────────────────────────────────────────────
+    if clim is None:
+        clim = _auto_clim(scalars, symmetric=symmetric)
+
+    # ── Render each view via PyVista ──────────────────────────────────
+    imgs = []
+    for view_name in views:
+        cpos = _PV_BRAIN_CAMERAS.get(view_name,
+                                      _PV_BRAIN_CAMERAS["lateral_lh"])
+        img = _render_pv_view(
+            mesh=mesh,
+            scalars=scalars,
+            cmap=cmap,
+            clim=clim,
+            camera_position=cpos,
+            window_size=window_size,
+            curvature=curvature,
+            threshold=threshold,
+            show_scalar_bar=False,
+            use_pbr=True,
+            ssao=True,
+        )
+        imgs.append(img)
+
+    # ── Composite into matplotlib figure ──────────────────────────────
+    if figsize is None:
+        spec = JOURNAL_SPECS.get(journal, JOURNAL_SPECS.get("nature", {}))
+        w = spec.get("double", 7.2)
+        figsize = (w, w / n_views * 0.85)
+
+    fig = plt.figure(figsize=figsize, dpi=dpi, facecolor="white")
+    gs = gridspec.GridSpec(
+        1, n_views + 1,
+        width_ratios=[1] * n_views + [0.04],
+        wspace=0.02,
+    )
+
+    for i, (img, view_name) in enumerate(zip(imgs, views)):
+        ax = fig.add_subplot(gs[0, i])
+        ax.imshow(img)
+        ax.axis("off")
+        if view_labels:
+            label = (
+                view_name
+                .replace("_lh", " (LH)").replace("_rh", " (RH)")
+                .replace("_", " ").title()
+            )
+            ax.set_title(label, fontsize=7, pad=2)
+
+    # ── Shared colour bar ─────────────────────────────────────────────
+    cbar_ax = fig.add_subplot(gs[0, -1])
+    if symmetric:
+        norm = TwoSlopeNorm(vcenter=0, vmin=clim[0], vmax=clim[1])
+    else:
+        norm = Normalize(vmin=clim[0], vmax=clim[1])
+    cb = ColorbarBase(
+        cbar_ax, cmap=plt.get_cmap(cmap), norm=norm,
+        orientation="vertical",
+    )
+    if cbar_label:
+        cb.set_label(cbar_label, fontsize=8)
+    cb.ax.tick_params(labelsize=7)
+
+    if title:
+        fig.suptitle(title, fontsize=10, fontweight="bold", y=1.02)
+
+    if output_path:
+        save_figure(fig, output_path, dpi=dpi)
+
+    return fig

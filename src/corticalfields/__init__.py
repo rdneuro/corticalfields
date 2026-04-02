@@ -102,6 +102,10 @@ def __getattr__(name: str):
         "plot_subcortical_3d": ("corticalfields.brainplots", "plot_subcortical_3d"),
         "plot_composite_figure": ("corticalfields.brainplots", "plot_composite_figure"),
         "save_figure": ("corticalfields.brainplots", "save_figure"),
+        # viz.py — quick scatter / trisurf brain visualization
+        "plot_brain_scatter": ("corticalfields.viz", "plot_brain_scatter"),
+        # brainplots.py — PyVista BrainSpace-style lateral + medial views
+        "plot_brain_views": ("corticalfields.brainplots", "plot_brain_views"),
         # datasets.py (toy dataset download — lightweight, stdlib only)
         "fetch_toy_dataset": ("corticalfields.datasets", "fetch_toy_dataset"),
         "clear_toy_dataset": ("corticalfields.datasets", "clear_toy_dataset"),
@@ -147,6 +151,8 @@ __all__ = [
     "plot_network_graph", "plot_asymmetry_bands",
     "plot_krr_diagnostic", "plot_subcortical_3d",
     "plot_composite_figure", "save_figure",
+    # Quick brain scatter + PyVista brain views
+    "plot_brain_scatter", "plot_brain_views",
     # Toy dataset download
     "fetch_toy_dataset", "clear_toy_dataset",
     "load_example_surface", "ToyDataset",

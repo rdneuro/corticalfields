@@ -22,7 +22,10 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.gridspec as gridspec
 from matplotlib.figure import Figure
+from matplotlib.colors import Normalize, TwoSlopeNorm
+from matplotlib.colorbar import ColorbarBase
 
 logger = logging.getLogger(__name__)
 
@@ -353,5 +356,329 @@ def _plot_surface_matplotlib(
 
     if output_path is not None:
         fig.savefig(str(output_path), dpi=300, bbox_inches="tight")
+
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Quick brain scatter / trisurf — works with CorticalSurface AND
+# CorticalPointCloud (scatter) or CorticalSurface only (trisurf)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Camera presets: (elevation, azimuth) for FreeSurfer RAS coords ────
+BRAIN_VIEWS = {
+    "lateral_lh":   (0, -90),
+    "medial_lh":    (0,  90),
+    "lateral_rh":   (0,  90),
+    "medial_rh":    (0, -90),
+    "dorsal":       (90,   0),
+    "ventral":      (-90,  0),
+    "anterior":     (0,    0),
+    "posterior":     (0,  180),
+}
+
+# ── Multi-view presets ────────────────────────────────────────────────
+BRAIN_VIEW_PRESETS = {
+    "lateral+medial_lh": ["lateral_lh", "medial_lh"],
+    "lateral+medial_rh": ["lateral_rh", "medial_rh"],
+    "4view_lh":          ["lateral_lh", "medial_lh", "dorsal", "ventral"],
+    "4view_rh":          ["lateral_rh", "medial_rh", "dorsal", "ventral"],
+}
+
+
+def _resolve_brain_input(vertices, scalars, faces, hemi):
+    """
+    Accept CorticalSurface, CorticalPointCloud, or raw numpy arrays.
+
+    Returns ``(vertices_array, scalars_array, faces_or_None, hemi_str)``.
+    If *scalars* is a string, it is treated as an overlay name on the
+    surface or point-cloud object passed as *vertices*.
+    """
+    # ── CorticalSurface ───────────────────────────────────────────────
+    try:
+        from corticalfields.surface import CorticalSurface
+        if isinstance(vertices, CorticalSurface):
+            surf = vertices
+            hemi = surf.hemi
+            if faces is None:
+                faces = surf.faces
+            if isinstance(scalars, str):
+                scalars = surf.get_overlay(scalars)
+            return np.asarray(surf.vertices), np.asarray(scalars), faces, hemi
+    except ImportError:
+        pass
+
+    # ── CorticalPointCloud ────────────────────────────────────────────
+    try:
+        from corticalfields.pointcloud import CorticalPointCloud
+        if isinstance(vertices, CorticalPointCloud):
+            pc = vertices
+            hemi = pc.hemi
+            if isinstance(scalars, str):
+                scalars = pc.overlays[scalars]
+            return np.asarray(pc.points), np.asarray(scalars), None, hemi
+    except ImportError:
+        pass
+
+    # ── Raw arrays ────────────────────────────────────────────────────
+    return (
+        np.asarray(vertices, dtype=np.float64),
+        np.asarray(scalars, dtype=np.float64),
+        np.asarray(faces, dtype=np.int64) if faces is not None else None,
+        hemi,
+    )
+
+
+def plot_brain_scatter(
+    vertices,
+    scalars,
+    faces=None,
+    *,
+    hemi: str = "lh",
+    views: Optional[Union[str, List[str]]] = None,
+    backend: str = "matplotlib",
+    cmap: str = "RdBu_r",
+    clim: Optional[Tuple[float, float]] = None,
+    symmetric: bool = False,
+    title: str = "",
+    cbar_label: str = "",
+    n_points: int = 25000,
+    point_size: float = 0.3,
+    alpha: float = 1.0,
+    figsize: Optional[Tuple[float, float]] = None,
+    dpi: int = 150,
+    seed: int = 42,
+    output_path: Optional[Union[str, Path]] = None,
+) -> Figure:
+    """
+    Quick brain surface visualization using matplotlib.
+
+    Renders one or more views of a brain surface colour-mapped by a
+    per-vertex scalar array.  Two rendering backends are available:
+
+    ``'matplotlib'`` (default)
+        3D scatter plot.  Works with **both** ``CorticalSurface``
+        (mesh) and ``CorticalPointCloud`` (no faces).  Fast, lightweight,
+        no GPU needed.  Points are randomly sub-sampled to *n_points*
+        for performance.
+
+    ``'trisurf'``
+        Solid triangulated surface rendering.  Requires **faces** —
+        i.e. only works with ``CorticalSurface`` (or when faces are
+        passed explicitly).  Slower but produces a continuous surface.
+
+    Parameters
+    ----------
+    vertices : ndarray (N, 3) | CorticalSurface | CorticalPointCloud
+        Vertex coordinates in RAS millimetres, or a CF object from
+        which coordinates (and optionally faces / hemi) are extracted
+        automatically.
+    scalars : ndarray (N,) | str
+        Per-vertex values to colour-map (thickness, z-score, φ_k, HKS,
+        etc.).  If a string, treated as an overlay name on the object
+        passed as *vertices*.
+    faces : ndarray (F, 3) or None
+        Triangle connectivity.  Required for ``backend='trisurf'``.
+        Auto-extracted when *vertices* is a ``CorticalSurface``.
+    hemi : ``'lh'`` | ``'rh'``
+        Hemisphere — determines default camera angles.  Auto-detected
+        from ``CorticalSurface.hemi`` / ``CorticalPointCloud.hemi``.
+    views : str | list[str] | None
+        Camera view(s).  Individual names: ``'lateral_lh'``,
+        ``'medial_lh'``, ``'dorsal'``, ``'ventral'``, ``'anterior'``,
+        ``'posterior'``.  Presets: ``'lateral+medial_lh'`` (default),
+        ``'4view_lh'``.  Or pass a list of view names.
+    backend : ``'matplotlib'`` | ``'trisurf'``
+        Rendering engine (see above).
+    cmap : str
+        Matplotlib colourmap.
+    clim : (vmin, vmax) | None
+        Colour limits.  ``None`` → auto from 2nd/98th percentiles.
+    symmetric : bool
+        Centre the colourbar at zero (recommended for z-scores,
+        eigenvectors, asymmetry maps).
+    title : str
+        Figure super-title.
+    cbar_label : str
+        Colour-bar label text.
+    n_points : int
+        Max scatter points per view (sub-sampled randomly for speed).
+        Ignored when ``backend='trisurf'``.
+    point_size : float
+        Scatter marker size (matplotlib *s* parameter).
+    alpha : float
+        Opacity (0–1).
+    figsize : (width, height) | None
+        Figure size in inches.  ``None`` → auto-sized.
+    dpi : int
+        Figure resolution.
+    seed : int
+        Random seed for reproducible sub-sampling.
+    output_path : str | Path | None
+        If given, saves the figure to this path.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+
+    Examples
+    --------
+    Quick thickness scatter from a ``CorticalSurface``::
+
+        fig = plot_brain_scatter(surf, "thickness", cmap="YlOrRd",
+                                 cbar_label="mm")
+
+    Eigenfunction on both views::
+
+        fig = plot_brain_scatter(surf.vertices, lb.eigenvectors[:, 5],
+                                 faces=surf.faces, hemi="lh",
+                                 cmap="RdBu_r", symmetric=True,
+                                 title="φ₅")
+
+    Solid trisurf rendering::
+
+        fig = plot_brain_scatter(surf, "thickness", backend="trisurf",
+                                 cmap="YlOrRd", clim=(1, 4.5))
+
+    Point-cloud (no faces)::
+
+        fig = plot_brain_scatter(pc, "thickness", hemi="lh")
+
+    Notes
+    -----
+    For publication-quality PyVista rendering with curvature underlay,
+    use :func:`~corticalfields.brainplots.plot_brain_views` instead.
+    """
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    # ── Resolve input ─────────────────────────────────────────────────
+    vertices, scalars, faces, hemi = _resolve_brain_input(
+        vertices, scalars, faces, hemi,
+    )
+
+    # ── Resolve views ─────────────────────────────────────────────────
+    if views is None:
+        views = f"lateral+medial_{hemi}"
+    if isinstance(views, str):
+        if views in BRAIN_VIEW_PRESETS:
+            views = BRAIN_VIEW_PRESETS[views]
+        elif views in BRAIN_VIEWS:
+            views = [views]
+        else:
+            raise ValueError(
+                f"Unknown view: {views!r}. "
+                f"Use one of {sorted(list(BRAIN_VIEWS) + list(BRAIN_VIEW_PRESETS))}"
+            )
+    n_views = len(views)
+
+    # ── Validate backend ──────────────────────────────────────────────
+    if backend == "trisurf" and faces is None:
+        raise ValueError(
+            "backend='trisurf' requires faces (triangle connectivity).  "
+            "Pass a CorticalSurface or provide faces= explicitly.  "
+            "For CorticalPointCloud (no faces), use backend='matplotlib'."
+        )
+
+    # ── Colour limits ─────────────────────────────────────────────────
+    if clim is None:
+        valid = scalars[np.isfinite(scalars)]
+        if len(valid) == 0:
+            clim = (0.0, 1.0)
+        elif symmetric:
+            vlim = float(np.percentile(np.abs(valid), 98))
+            clim = (-vlim, vlim)
+        else:
+            clim = (
+                float(np.percentile(valid, 2)),
+                float(np.percentile(valid, 98)),
+            )
+
+    # ── Sub-sample indices (scatter only) ─────────────────────────────
+    rng = np.random.RandomState(seed)
+    N = len(vertices)
+    if backend == "matplotlib" and N > n_points:
+        idx = rng.choice(N, n_points, replace=False)
+    else:
+        idx = np.arange(N)
+
+    # ── Figure layout: views + thin colourbar column ──────────────────
+    if figsize is None:
+        figsize = (5.5 * n_views, 5)
+
+    fig = plt.figure(figsize=figsize, dpi=dpi)
+    gs = gridspec.GridSpec(
+        1, n_views + 1,
+        width_ratios=[1] * n_views + [0.04],
+        wspace=0.05,
+    )
+
+    # ── Render each view ──────────────────────────────────────────────
+    for i, view_name in enumerate(views):
+        elev, azim = BRAIN_VIEWS.get(view_name, (0, -90))
+        ax = fig.add_subplot(gs[0, i], projection="3d")
+
+        if backend == "trisurf":
+            # Solid triangulated surface (needs faces)
+            colormap = plt.get_cmap(cmap)
+            norm = Normalize(vmin=clim[0], vmax=clim[1])
+            face_vals = scalars[faces].mean(axis=1)
+            face_colors = colormap(norm(face_vals))
+            face_colors[:, 3] = alpha
+
+            tri_verts = vertices[faces]  # (F, 3, 3)
+            poly = Poly3DCollection(tri_verts, linewidths=0, alpha=alpha)
+            poly.set_facecolor(face_colors)
+            poly.set_edgecolor("none")
+            ax.add_collection3d(poly)
+
+            # Set axis limits from vertex bounds
+            for dim in range(3):
+                lo = vertices[:, dim].min()
+                hi = vertices[:, dim].max()
+                pad = (hi - lo) * 0.05
+                getattr(ax, f"set_{'xyz'[dim]}lim")(lo - pad, hi + pad)
+
+        else:
+            # Scatter plot (works with any point set)
+            ax.scatter(
+                vertices[idx, 0], vertices[idx, 1], vertices[idx, 2],
+                c=scalars[idx], cmap=cmap, s=point_size, alpha=alpha,
+                vmin=clim[0], vmax=clim[1], rasterized=True,
+            )
+
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
+        # Human-readable view label
+        label = (
+            view_name
+            .replace("_lh", " (LH)").replace("_rh", " (RH)")
+            .replace("_", " ").title()
+        )
+        ax.set_title(label, fontsize=9, pad=2)
+
+    # ── Shared colour bar ─────────────────────────────────────────────
+    cbar_ax = fig.add_subplot(gs[0, -1])
+    if symmetric:
+        norm = TwoSlopeNorm(vcenter=0, vmin=clim[0], vmax=clim[1])
+    else:
+        norm = Normalize(vmin=clim[0], vmax=clim[1])
+    cb = ColorbarBase(
+        cbar_ax, cmap=plt.get_cmap(cmap), norm=norm,
+        orientation="vertical",
+    )
+    if cbar_label:
+        cb.set_label(cbar_label, fontsize=9)
+    cb.ax.tick_params(labelsize=7)
+
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight="bold", y=1.02)
+
+    plt.tight_layout()
+
+    if output_path:
+        fig.savefig(str(output_path), dpi=dpi, bbox_inches="tight",
+                    facecolor="white")
+        logger.info("Saved: %s", output_path)
 
     return fig
