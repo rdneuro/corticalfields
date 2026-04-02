@@ -395,34 +395,79 @@ def _eigsh_torch(
     L: sp.spmatrix, M: sp.spmatrix,
     k: int, tol: float, maxiter: int, dtype: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """PyTorch GPU LOBPCG — caution: known numerical issues (#101075)."""
+    """
+    PyTorch GPU eigensolver for the generalised problem Lφ = λMφ.
+
+    Uses the same spectral-complement strategy as the CuPy backend:
+
+        1. Transform to standard form: A = M^{-1/2} L M^{-1/2}
+           (exact because M is diagonal/lumped mass)
+        2. Find λ_max of A  (single eigh call on a small Lanczos basis,
+           or torch.lobpcg with k=1 which='LM' — fast & robust)
+        3. Form B = λ_max·I − A  (spectral complement)
+           Largest eigenvalues of B = smallest eigenvalues of A
+        4. torch.lobpcg(B, k, largest=True) — Lanczos converges fastest
+           at spectral extremes, and ``largest=True`` is the well-tested
+           code path in PyTorch.
+        5. Convert back: λ_i = λ_max − μ_i,  φ_i = M^{-1/2} y_i
+
+    Previous implementation used torch.lobpcg(largest=False) with a
+    generalised eigenproblem (A, B=M), which triggers PyTorch issue
+    #101075 — numerical instability, NaN, or hangs.
+    """
     import torch
 
+    np_dtype = np.float32 if dtype == "float32" else np.float64
     torch_dtype = torch.float32 if dtype == "float32" else torch.float64
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    N = L.shape[0]
 
-    def _to_torch_csr(mat, dt, dev):
+    logger.info("  torch eigensolver: N=%d, k=%d, dtype=%s, device=%s",
+                N, k, dtype, device)
+
+    # ── Step 1: Generalised → standard via M^{-1/2} ─────────────────
+    # M is diagonal lumped mass (or close to it).
+    M_diag = np.array(M.diagonal()).ravel().astype(np_dtype)
+    M_diag = np.maximum(M_diag, 1e-16)
+    M_inv_sqrt = (1.0 / np.sqrt(M_diag)).astype(np_dtype)
+
+    D_sp = sp.diags(M_inv_sqrt, format="csc", dtype=np_dtype)
+    A_cpu = (D_sp @ L.tocsc().astype(np_dtype) @ D_sp).tocsc()
+
+    # ── Helper: scipy sparse → torch sparse CSR on device ────────────
+    def _to_csr(mat):
         m = mat.tocsr()
         return torch.sparse_csr_tensor(
-            torch.tensor(m.indptr, dtype=torch.int64, device=dev),
-            torch.tensor(m.indices, dtype=torch.int64, device=dev),
-            torch.tensor(m.data, dtype=dt, device=dev),
+            torch.tensor(m.indptr, dtype=torch.int64, device=device),
+            torch.tensor(m.indices, dtype=torch.int64, device=device),
+            torch.tensor(m.data, dtype=torch_dtype, device=device),
             size=m.shape,
         )
 
-    L_t = _to_torch_csr(L, torch_dtype, device)
-    M_t = _to_torch_csr(M, torch_dtype, device)
+    A_t = _to_csr(A_cpu)
 
+    # ── Step 2: Find λ_max via lobpcg(k=1, largest=True) ────────────
     torch.manual_seed(42)
-    X0 = torch.randn(L.shape[0], k, dtype=torch_dtype, device=device)
+    X0_lm = torch.randn(N, 1, dtype=torch_dtype, device=device)
+    lm_vals, _ = torch.lobpcg(A_t, k=1, X=X0_lm, largest=True,
+                               niter=min(maxiter, 100), tol=tol)
+    lambda_max = float(lm_vals[0].item()) * 1.01   # 1% safety buffer
 
-    eigenvalues, eigenvectors = torch.lobpcg(
-        A=L_t, k=k, B=M_t, X=X0,
-        largest=False, niter=maxiter, tol=tol,
-    )
+    # ── Step 3: Spectral complement B = λ_max·I − A ─────────────────
+    B_cpu = (sp.eye(N, format="csc", dtype=np_dtype) * np_dtype(lambda_max)
+             - A_cpu).tocsc()
+    B_t = _to_csr(B_cpu)
 
-    evals = eigenvalues.cpu().numpy().astype(np.float64)
-    evecs = eigenvectors.cpu().numpy().astype(np.float64)
+    # ── Step 4: k largest of B = k smallest of A ────────────────────
+    torch.manual_seed(42)
+    X0 = torch.randn(N, k, dtype=torch_dtype, device=device)
+    mu, Y = torch.lobpcg(B_t, k=k, X=X0, largest=True,
+                          niter=maxiter, tol=tol)
+
+    # ── Step 5: Convert back ─────────────────────────────────────────
+    evals = (lambda_max - mu.cpu().numpy()).astype(np.float64)
+    evecs = (Y.cpu().numpy() * M_inv_sqrt[:, None]).astype(np.float64)
+
     order = np.argsort(evals)
     return evals[order], evecs[:, order]
 

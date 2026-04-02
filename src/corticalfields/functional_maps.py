@@ -297,7 +297,7 @@ def compute_functional_map(
     alpha_orient: float = 0.0,
     A_source: Optional[np.ndarray] = None,
     A_target: Optional[np.ndarray] = None,
-    backend: str = "numpy",
+    backend: str = "auto",
 ) -> FunctionalMap:
     """
     Compute a functional map between two surfaces.
@@ -337,6 +337,9 @@ def compute_functional_map(
         If None, computed from ``lb_source``.
     A_target : np.ndarray or None
         Pre-computed target descriptor matrix, shape (K_tgt, D).
+    backend : str
+        ``'auto'``, ``'cupy'``, ``'torch'``, or ``'numpy'``.
+        ``'auto'`` selects cupy → torch → numpy.
 
     Returns
     -------
@@ -406,9 +409,20 @@ def compute_functional_map(
 
     # Solve row by row of C (each row i of C is independent due to diagonal structure)
     # GPU backends: batch all k_tgt linear systems into a single batched solve
-    if backend == "torch":
+    # Resolve "auto" to best available backend
+    _be = backend.lower().strip()
+    if _be == "auto":
+        from corticalfields.backends import _check_cupy, _check_torch_cuda
+        if _check_cupy():
+            _be = "cupy"
+        elif _check_torch_cuda():
+            _be = "torch"
+        else:
+            _be = "numpy"
+
+    if _be == "torch":
         C = _solve_functional_map_torch(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt, k_src)
-    elif backend == "cupy":
+    elif _be == "cupy":
         C = _solve_functional_map_cupy(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt, k_src)
     else:
         # NumPy fallback (row-by-row)
@@ -448,7 +462,7 @@ def zoomout_refine(
     k_final: int = 200,
     n_iterations: int = 10,
     step: Optional[int] = None,
-    backend: str = "numpy",
+    backend: str = "auto",
 ) -> FunctionalMap:
     """
     Refine a functional map using the ZoomOut algorithm (Melzi et al., 2019).
@@ -472,13 +486,26 @@ def zoomout_refine(
     step : int or None
         Increment per iteration. If None, computed automatically.
     backend : str
-        ``'cupy'``, ``'torch'``, or ``'numpy'``.
+        ``'auto'``, ``'cupy'``, ``'torch'``, or ``'numpy'``.
+        ``'auto'`` selects cupy → torch → numpy.
 
     Returns
     -------
     FunctionalMap
         Refined functional map at resolution k_final.
     """
+    # Resolve "auto" to best available backend
+    _be = backend.lower().strip()
+    if _be == "auto":
+        from corticalfields.backends import _check_cupy, _check_torch_cuda
+        if _check_cupy():
+            _be = "cupy"
+        elif _check_torch_cuda():
+            _be = "torch"
+        else:
+            _be = "numpy"
+    backend = _be
+
     k_init = fm.k_source
     k_max = min(k_final, lb_source.n_eigenpairs, lb_target.n_eigenpairs)
 
@@ -566,6 +593,76 @@ def zoomout_refine(
             )
         except Exception as e:
             logger.warning("CuPy ZoomOut failed (%s) — falling back to CPU", e)
+
+    # ── GPU path (PyTorch) ───────────────────────────────────────────
+    if backend == "torch":
+        try:
+            import torch
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            logger.info("  ZoomOut torch backend on %s", device)
+
+            phi_src_t = torch.tensor(phi_src, dtype=torch.float32, device=device)
+            phi_tgt_t = torch.tensor(phi_tgt, dtype=torch.float32, device=device)
+            C_t = torch.tensor(C, dtype=torch.float32, device=device)
+
+            for it in range(n_iterations):
+                k_current = min(k_init + (it + 1) * step, k_max)
+                k_old_tgt = C_t.shape[0]
+                k_old_src = C_t.shape[1]
+
+                # 1. Spectral embeddings → numpy for NN dispatch
+                emb_tgt = (phi_tgt_t[:, :k_old_tgt] @ C_t).cpu().numpy()
+                emb_src = phi_src_t[:, :k_old_src].cpu().numpy()
+
+                # 2. GPU nearest-neighbour via torch
+                p2p = _nearest_neighbour_map(emb_tgt, emb_src,
+                                             chunk_size=8192, backend="torch")
+
+                # 3. Pull-back + Procrustes on GPU
+                phi_src_k = phi_src_t[:, :k_current]
+                phi_tgt_k = phi_tgt_t[:, :k_current]
+                p2p_t = torch.tensor(p2p, dtype=torch.long, device=device)
+                phi_src_pulled = phi_src_k[p2p_t]  # (N_tgt, k_current)
+
+                if _mass_is_identity or M_tgt is None:
+                    C_t = phi_tgt_k.T @ phi_src_pulled
+                else:
+                    # Sparse mass multiply on CPU, rest on GPU
+                    M_phi = torch.tensor(
+                        (M_tgt @ phi_tgt[:, :k_current]).astype(np.float32),
+                        dtype=torch.float32, device=device,
+                    )
+                    C_t = M_phi.T @ phi_src_pulled
+
+                # SVD for nearest orthogonal (Procrustes)
+                U, _, Vt = torch.linalg.svd(C_t, full_matrices=False)
+                C_t = U @ Vt
+
+                logger.info("  ZoomOut iter %d/%d: k=%d, off-diag=%.4f",
+                            it + 1, n_iterations, k_current,
+                            _off_diagonal_frobenius(C_t.cpu().numpy()))
+
+            C = C_t.cpu().numpy().astype(np.float64)
+            del phi_src_t, phi_tgt_t, C_t
+            torch.cuda.empty_cache()
+
+            return FunctionalMap(
+                C=C,
+                k_source=k_current,
+                k_target=k_current,
+                source_eigenvalues=lb_source.eigenvalues[:k_current],
+                target_eigenvalues=lb_target.eigenvalues[:k_current],
+                metadata={
+                    **fm.metadata,
+                    "refinement": "zoomout",
+                    "k_init": k_init,
+                    "k_final": k_current,
+                    "n_iterations": n_iterations,
+                    "backend": "torch",
+                },
+            )
+        except Exception as e:
+            logger.warning("Torch ZoomOut failed (%s) — falling back to CPU", e)
 
     # ── CPU path ─────────────────────────────────────────────────────
     for it in range(n_iterations):
@@ -705,7 +802,7 @@ def compute_interhemispheric_map(
     alpha_lap: float = 1e-3,
     zoomout: bool = True,
     n_zoomout_iters: int = 10,
-    backend: str = "numpy",
+    backend: str = "auto",
 ) -> FunctionalMap:
     """
     Compute an inter-hemispheric functional map.
@@ -735,12 +832,26 @@ def compute_interhemispheric_map(
         Whether to apply ZoomOut refinement.
     n_zoomout_iters : int
         Number of ZoomOut iterations.
+    backend : str
+        ``'auto'``, ``'cupy'``, ``'torch'``, or ``'numpy'``.
+        ``'auto'`` selects cupy → torch → numpy.
 
     Returns
     -------
     FunctionalMap
         Inter-hemispheric functional map (source=LH, target=RH).
     """
+    # Resolve "auto" once and pass the resolved backend to sub-functions
+    _be = backend.lower().strip()
+    if _be == "auto":
+        from corticalfields.backends import _check_cupy, _check_torch_cuda
+        if _check_cupy():
+            _be = "cupy"
+        elif _check_torch_cuda():
+            _be = "torch"
+        else:
+            _be = "numpy"
+
     fm = compute_functional_map(
         lb_source=lb_lh,
         lb_target=lb_rh,
@@ -748,7 +859,7 @@ def compute_interhemispheric_map(
         descriptor_type=descriptor_type,
         n_descriptors=n_descriptors,
         alpha_lap=alpha_lap,
-        backend=backend,
+        backend=_be,
     )
 
     if zoomout and k_final > k:
@@ -756,7 +867,7 @@ def compute_interhemispheric_map(
             fm, lb_lh, lb_rh,
             k_final=k_final,
             n_iterations=n_zoomout_iters,
-            backend=backend,
+            backend=_be,
         )
 
     fm.metadata["type"] = "interhemispheric"
@@ -899,14 +1010,22 @@ def _nearest_neighbour_map(
         except ImportError:
             logger.warning("PyTorch unavailable for NN — falling back to CPU")
 
-    # ── CPU fallback: KDTree ─────────────────────────────────────────
-    from scipy.spatial import cKDTree
-    tree = cKDTree(emb_source)
-    p2p = np.zeros(N, dtype=np.int64)
+    # ── CPU fallback: brute-force BLAS ──────────────────────────────
+    # KDTree degenerates in high dimensions (>~20D) — MUCH slower
+    # than brute-force for the 50-200D spectral embeddings used in
+    # ZoomOut.  Use the same ||t||² + ||s||² - 2·t·sᵀ trick as the
+    # GPU paths, backed by NumPy/BLAS DGEMM.
+    emb_source = np.ascontiguousarray(emb_source, dtype=np.float64)
+    emb_target = np.ascontiguousarray(emb_target, dtype=np.float64)
+    src_sq = np.sum(emb_source ** 2, axis=1)       # (N_src,)
+    p2p = np.empty(N, dtype=np.int64)
     for start in range(0, N, chunk_size):
         end = min(start + chunk_size, N)
-        _, idx = tree.query(emb_target[start:end])
-        p2p[start:end] = idx
+        tgt_chunk = emb_target[start:end]           # (chunk, D)
+        tgt_sq = np.sum(tgt_chunk ** 2, axis=1, keepdims=True)  # (chunk, 1)
+        # (chunk, N_src) = (chunk,1) + (1,N_src) - 2*(chunk,D)@(D,N_src)
+        dist = tgt_sq + src_sq[None, :] - 2.0 * (tgt_chunk @ emb_source.T)
+        p2p[start:end] = np.argmin(dist, axis=1)
     return p2p
 
 
