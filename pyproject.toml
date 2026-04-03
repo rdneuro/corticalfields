@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "corticalfields"
 version = "0.2.0"
-description = "Spectral cortical analysis on meshes and point clouds — Laplace-Beltrami decomposition, atlas-free asymmetry, GPU-accelerated optimal transport, geometric deep learning, Bayesian inference, and normative modeling for structural neuroimaging."
+description = "Spectral cortical and subcortical analysis on meshes and point clouds — Laplace-Beltrami decomposition, atlas-free asymmetry, GPU-accelerated optimal transport, hippocampal subfield analysis (HippUnfold), ShapeDNA/BrainPrint spectral fingerprinting, geometric deep learning, Bayesian inference, and normative modeling for structural neuroimaging."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -19,6 +19,8 @@ keywords = [
     "spectral-analysis", "functional-maps", "optimal-transport",
     "bayesian-inference", "horseshoe-prior", "pymc",
     "geometric-deep-learning", "diffusionnet", "equivariant",
+    "hippocampus", "hippunfold", "subcortical", "shape-analysis",
+    "mtle-hs", "temporal-lobe-epilepsy", "shapedna", "brainprint",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -44,6 +46,7 @@ dependencies = [
     "matplotlib>=3.7",
     "tqdm>=4.65",
     "joblib>=1.3",
+    "pandas>=2.0",
 ]
 
 # ── Optional dependency groups ──────────────────────────────────────────
@@ -148,6 +151,24 @@ cuda = [
     "cupy-cuda13x",
 ]
 
+# ── Hippocampal analysis ─────────────────────────────────────────────────
+hippocampus = [
+    "corticalfields[viz]",
+    "brainspace>=0.1",
+]
+
+# ── Subcortical shape analysis ──────────────────────────────────────────
+subcortical = [
+    "corticalfields[pointcloud]",
+    "corticalfields[pointcloud-ot]",
+]
+
+# ── Tutorials (synthetic clinical data + statistical testing) ───────────
+tutorials = [
+    "pandas>=2.0",
+    "seaborn>=0.13",
+]
+
 # ── Visualization ───────────────────────────────────────────────────────
 viz = [
     "surfplot>=0.2",
@@ -173,6 +194,9 @@ all = [
     "corticalfields[viz]",
     "corticalfields[lapy-fast]",
     "corticalfields[igraph]",
+    "corticalfields[hippocampus]",
+    "corticalfields[subcortical]",
+    "corticalfields[tutorials]",
 ]
 
 # ── Development ─────────────────────────────────────────────────────────
