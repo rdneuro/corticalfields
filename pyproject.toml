@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corticalfields"
-version = "0.1.7"
-description = "Geodesic-aware Gaussian Process normative modeling on cortical surfaces with spectral shape descriptors, Bayesian analysis, and information-theoretic surprise maps."
+version = "0.2.0"
+description = "Spectral cortical analysis on meshes and point clouds — Laplace-Beltrami decomposition, atlas-free asymmetry, GPU-accelerated optimal transport, geometric deep learning, Bayesian inference, and normative modeling for structural neuroimaging."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -13,10 +13,12 @@ authors = [
     {name = "rdneuro", email = "r.debona@ufrj.br"},
 ]
 keywords = [
-    "neuroimaging", "cortical-surface", "gaussian-process",
-    "normative-modeling", "epilepsy", "heat-kernel-signature",
-    "laplace-beltrami", "surprise-maps", "spectral-analysis",
+    "neuroimaging", "cortical-surface", "point-cloud",
+    "gaussian-process", "normative-modeling", "epilepsy",
+    "heat-kernel-signature", "laplace-beltrami", "surprise-maps",
+    "spectral-analysis", "functional-maps", "optimal-transport",
     "bayesian-inference", "horseshoe-prior", "pymc",
+    "geometric-deep-learning", "diffusionnet", "equivariant",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -47,21 +49,57 @@ dependencies = [
 # ── Optional dependency groups ──────────────────────────────────────────
 #
 # Install what you need:
-#   pip install corticalfields                    # core spectral pipeline
-#   pip install corticalfields[bayesian]          # + Bayesian analysis
-#   pip install corticalfields[bayesian-fast]     # + nutpie (fastest CPU)
-#   pip install corticalfields[bayesian-gpu]      # + numpyro/blackjax (GPU)
-#   pip install corticalfields[lapy]              # + LaPy Laplacian backend
-#   pip install corticalfields[lapy-fast]         # + LaPy with CHOLMOD
-#   pip install corticalfields[igraph]            # + fast graph metrics
-#   pip install corticalfields[cuda]              # + CuPy GPU backend
-#   pip install corticalfields[viz]               # + brain surface viz
-#   pip install corticalfields[all]               # everything (no GPU)
-#   pip install corticalfields[all,cuda]          # everything + GPU
+#
+#   pip install corticalfields                     # core spectral pipeline
+#   pip install corticalfields[pointcloud]         # + point cloud LBO + morphometrics
+#   pip install corticalfields[pointcloud-dl]      # + DiffusionNet, EGNN, PyG
+#   pip install corticalfields[pointcloud-ot]      # + GPU Sinkhorn (GeomLoss)
+#   pip install corticalfields[all-pointcloud]     # all point cloud extras
+#   pip install corticalfields[bayesian]           # + Bayesian analysis
+#   pip install corticalfields[bayesian-fast]      # + nutpie (fastest CPU sampler)
+#   pip install corticalfields[bayesian-gpu]       # + numpyro/blackjax (GPU)
+#   pip install corticalfields[viz]                # + brain surface viz
+#   pip install corticalfields[all]                # everything
 
 [project.optional-dependencies]
 
-# Bayesian analysis (pymc + arviz + preliz + pgmpy)
+# ── Point cloud processing ──────────────────────────────────────────────
+# Lightweight: LBO on point clouds + morphometrics + Open3D
+pointcloud = [
+    "robust-laplacian>=0.2.4",
+    "open3d>=0.18",
+    "potpourri3d>=0.0.8",
+]
+
+# Deep learning on point clouds: DiffusionNet, EGNN, PyG
+pointcloud-dl = [
+    "corticalfields[pointcloud]",
+    "torch-geometric>=2.4",
+]
+
+# GPU-accelerated optimal transport on point clouds
+pointcloud-ot = [
+    "corticalfields[pointcloud]",
+    "POT>=0.9",
+    "geomloss>=0.2",
+]
+
+# Point cloud registration (CPD, BCPD)
+pointcloud-reg = [
+    "corticalfields[pointcloud]",
+    "pycpd>=2.0",
+]
+
+# All point cloud extras
+all-pointcloud = [
+    "corticalfields[pointcloud]",
+    "corticalfields[pointcloud-dl]",
+    "corticalfields[pointcloud-ot]",
+    "corticalfields[pointcloud-reg]",
+]
+
+# ── Bayesian analysis ───────────────────────────────────────────────────
+# PyMC + ArViz + PreLiz + PgmPy + Bambi
 bayesian = [
     "pymc>=5.10",
     "arviz>=0.15",
@@ -85,39 +123,39 @@ bayesian-gpu = [
     "blackjax>=1.0",
     "jax[cuda13]>=0.4",
 ]
+
 bayesian-all = [
     "corticalfields[bayesian]",
     "corticalfields[bayesian-gpu]",
     "corticalfields[bayesian-fast]",
 ]
-# LaPy Laplacian backend (Deep-MI group)
+
+# ── LaPy backend ────────────────────────────────────────────────────────
 lapy = [
     "lapy>=1.0",
 ]
 
-# LaPy + CHOLMOD acceleration (requires SuiteSparse system library)
 lapy-fast = [
     "lapy[chol]>=1.0",
 ]
 
-# igraph for fast graph metrics (10-100x faster than NetworkX)
+# ── Misc GPU / graph backends ───────────────────────────────────────────
 igraph = [
     "igraph>=0.10",
 ]
 
-# CuPy GPU backend for spectral descriptors
 cuda = [
     "cupy-cuda13x",
 ]
 
-# Brain surface visualization
+# ── Visualization ───────────────────────────────────────────────────────
 viz = [
     "surfplot>=0.2",
     "brainspace>=0.1",
     "neuromaps>=0.0.4",
 ]
 
-# Full spectral pipeline extras (no GPU, no Bayesian)
+# ── Full spectral pipeline extras (no GPU, no Bayesian) ────────────────
 spectral-full = [
     "robust-laplacian>=0.2",
     "corticalfields[lapy-fast]",
@@ -126,18 +164,18 @@ spectral-full = [
     "geometric-kernels>=0.2",
 ]
 
-# Everything except GPU
+# ── Everything ──────────────────────────────────────────────────────────
 all = [
     "corticalfields[spectral-full]",
+    "corticalfields[all-pointcloud]",
     "corticalfields[bayesian-all]",
     "corticalfields[cuda]",
     "corticalfields[viz]",
     "corticalfields[lapy-fast]",
     "corticalfields[igraph]",
-#    "giotto-tda",
 ]
 
-# Development
+# ── Development ─────────────────────────────────────────────────────────
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
