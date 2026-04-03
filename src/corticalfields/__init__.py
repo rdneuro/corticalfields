@@ -16,55 +16,58 @@ Core pipeline:
 
 Modules
 -------
-surface      : Surface I/O — FreeSurfer, GIfTI, mesh utilities
-subcortical  : Subcortical surface extraction (aseg, hippocampal subfields,
-               HippUnfold) and closed-surface spectral analysis
-spectral     : Laplace–Beltrami decomposition, HKS, WKS, GPS
-kernels      : Spectral Matérn kernels for GPyTorch
-normative    : GP-based normative modeling pipeline
-surprise     : Information-theoretic anomaly scoring
-features     : Morphometric feature extraction from FreeSurfer
-graphs       : Cortical similarity network construction
-viz          : Publication-quality surface visualization
-brainplots   : Publication-grade brain plots (surfaces, graphs, matrices, composites)
-datasets     : Toy dataset download from Zenodo (fetch_toy_dataset)
+surface        : Surface I/O — FreeSurfer, GIfTI, mesh utilities
+subcortical    : Subcortical surface extraction + shape analysis + spectral
+                 fingerprinting (ShapeDNA, BrainPrint, curvatures, global
+                 descriptors, point cloud features, topology, asymmetry,
+                 normative z-scoring, Wasserstein distances)
+hippocampus    : Hippocampal surface analysis — HippUnfold I/O, subfield
+                 analysis, AP/PD axis profiling, gradients, MTLE-HS metrics,
+                 texture sampling, vertex-wise GLMs, TFCE
+viz_subcortical: Publication-quality visualization for subcortical +
+                 hippocampal structures (PyVista 3D, multi-view, fold/unfold,
+                 comparison panels, z-score maps, profile plots, bar charts)
+spectral       : Laplace–Beltrami decomposition, HKS, WKS, GPS
+kernels        : Spectral Matérn kernels for GPyTorch
+normative      : GP-based normative modeling pipeline
+surprise       : Information-theoretic anomaly scoring
+features       : Morphometric feature extraction from FreeSurfer
+graphs         : Cortical similarity network construction
+viz            : Publication-quality surface visualization (cortical)
+brainplots     : Publication-grade brain plots (surfaces, graphs, matrices)
+datasets       : Toy dataset download from Zenodo
 """
 
-__version__ = "0.1.6"
+__version__ = "0.2.0"
 __author__ = "rdneuro"
-
-# ── Lazy imports ────────────────────────────────────────────────────────
-# Heavy dependencies (torch, gpytorch) are only loaded when the modules
-# that need them are first accessed. This keeps `import corticalfields`
-# fast and memory-light for submodule-level usage.
 
 
 def __getattr__(name: str):
     """Lazy attribute loader — imports submodules on first access."""
     _MAP = {
-        # surface.py (lightweight — numpy/nibabel only)
+        # surface.py
         "CorticalSurface": ("corticalfields.surface", "CorticalSurface"),
         "load_freesurfer_surface": ("corticalfields.surface", "load_freesurfer_surface"),
-        # spectral.py (lightweight — numpy/scipy only)
+        # spectral.py
         "LaplaceBeltrami": ("corticalfields.spectral", "LaplaceBeltrami"),
         "heat_kernel_signature": ("corticalfields.spectral", "heat_kernel_signature"),
         "wave_kernel_signature": ("corticalfields.spectral", "wave_kernel_signature"),
         "global_point_signature": ("corticalfields.spectral", "global_point_signature"),
-        # kernels.py (heavy — torch + gpytorch)
+        # kernels.py
         "SpectralMaternKernel": ("corticalfields.kernels", "SpectralMaternKernel"),
-        # normative.py (heavy — torch + gpytorch)
+        # normative.py
         "CorticalNormativeModel": ("corticalfields.normative", "CorticalNormativeModel"),
-        # surprise.py (lightweight — numpy/scipy only)
+        # surprise.py
         "SurpriseMap": ("corticalfields.surprise", "SurpriseMap"),
         "compute_surprise": ("corticalfields.surprise", "compute_surprise"),
-        # features.py (lightweight)
+        # features.py
         "MorphometricProfile": ("corticalfields.features", "MorphometricProfile"),
-        # pointcloud.py (FreeSurfer-free cortical extraction)
+        # pointcloud.py
         "from_t1w": ("corticalfields.pointcloud", "from_t1w"),
         "T1wExtractionResult": ("corticalfields.pointcloud", "T1wExtractionResult"),
         "compute_mesh_laplacian": ("corticalfields.pointcloud", "compute_mesh_laplacian"),
         "compute_mesh_eigenpairs": ("corticalfields.pointcloud", "compute_mesh_eigenpairs"),
-        # eda_qc.py (EDA, QC, outlier detection)
+        # eda_qc.py
         "run_clinical_eda": ("corticalfields.eda_qc", "run_clinical_eda"),
         "run_spectral_eda": ("corticalfields.eda_qc", "run_spectral_eda"),
         "detect_clinical_outliers": ("corticalfields.eda_qc", "detect_clinical_outliers"),
@@ -73,18 +76,52 @@ def __getattr__(name: str):
         "generate_midthickness": ("corticalfields.eda_qc", "generate_midthickness"),
         "QCReport": ("corticalfields.eda_qc", "QCReport"),
         "EDAResult": ("corticalfields.eda_qc", "EDAResult"),
-        # subcortical.py (subcortical surface extraction + spectral pipeline)
+        # ══════════════════════════════════════════════════════════════
+        # subcortical.py (enhanced v0.2.0)
+        # ══════════════════════════════════════════════════════════════
         "SubcorticalSurface": ("corticalfields.subcortical", "SubcorticalSurface"),
         "load_subcortical_surface": ("corticalfields.subcortical", "load_subcortical_surface"),
         "load_subcortical_from_nifti": ("corticalfields.subcortical", "load_subcortical_from_nifti"),
+        "load_all_subcortical": ("corticalfields.subcortical", "load_all_subcortical"),
         "subcortical_spectral_analysis": ("corticalfields.subcortical", "subcortical_spectral_analysis"),
+        "shapedna_distance": ("corticalfields.subcortical", "shapedna_distance"),
+        "wasserstein_shape_distance": ("corticalfields.subcortical", "wasserstein_shape_distance"),
+        "brainprint_distance": ("corticalfields.subcortical", "brainprint_distance"),
+        "batch_shape_descriptors": ("corticalfields.subcortical", "batch_shape_descriptors"),
+        "batch_shapedna": ("corticalfields.subcortical", "batch_shapedna"),
+        "pairwise_shapedna_distance_matrix": ("corticalfields.subcortical", "pairwise_shapedna_distance_matrix"),
         "FS_ASEG_LABELS": ("corticalfields.subcortical", "FS_ASEG_LABELS"),
-        # utils.py additions
+        "FS_THALAMIC_NUCLEI": ("corticalfields.subcortical", "FS_THALAMIC_NUCLEI"),
+        # ══════════════════════════════════════════════════════════════
+        # hippocampus.py (NEW v0.2.0)
+        # ══════════════════════════════════════════════════════════════
+        "HippocampalSurface": ("corticalfields.hippocampus", "HippocampalSurface"),
+        "load_hippocampal_surface": ("corticalfields.hippocampus", "load_hippocampal_surface"),
+        "hippocampal_asymmetry_report": ("corticalfields.hippocampus", "hippocampal_asymmetry_report"),
+        "hippocampal_spectral_analysis": ("corticalfields.hippocampus", "hippocampal_spectral_analysis"),
+        "HIPPUNFOLD_SUBFIELDS": ("corticalfields.hippocampus", "HIPPUNFOLD_SUBFIELDS"),
+        "ILAE_HS_TYPES": ("corticalfields.hippocampus", "ILAE_HS_TYPES"),
+        # ══════════════════════════════════════════════════════════════
+        # viz_subcortical.py (NEW v0.2.0)
+        # ══════════════════════════════════════════════════════════════
+        "plot_subcortical_multiview": ("corticalfields.viz_subcortical", "plot_subcortical_multiview"),
+        "plot_subcortical_composite": ("corticalfields.viz_subcortical", "plot_subcortical_composite"),
+        "plot_hippocampal_foldunfold": ("corticalfields.viz_subcortical", "plot_hippocampal_foldunfold"),
+        "plot_hippocampal_comparison": ("corticalfields.viz_subcortical", "plot_hippocampal_comparison"),
+        "plot_subfield_metrics": ("corticalfields.viz_subcortical", "plot_subfield_metrics"),
+        "plot_subfield_asymmetry": ("corticalfields.viz_subcortical", "plot_subfield_asymmetry"),
+        "plot_ap_profile": ("corticalfields.viz_subcortical", "plot_ap_profile"),
+        "plot_zscore_surface": ("corticalfields.viz_subcortical", "plot_zscore_surface"),
+        "plot_shapedna_comparison": ("corticalfields.viz_subcortical", "plot_shapedna_comparison"),
+        "plot_point_cloud_3d": ("corticalfields.viz_subcortical", "plot_point_cloud_3d"),
+        # ══════════════════════════════════════════════════════════════
+        # utils.py
+        # ══════════════════════════════════════════════════════════════
         "estimate_n_eigenpairs": ("corticalfields.utils", "estimate_n_eigenpairs"),
         "gc_gpu": ("corticalfields.utils", "gc_gpu"),
         "vram_report": ("corticalfields.utils", "vram_report"),
         "vram_guard": ("corticalfields.utils", "vram_guard"),
-        # brainplots.py (publication-grade visualization — pyvista + matplotlib)
+        # brainplots.py
         "plot_surface_4view": ("corticalfields.brainplots", "plot_surface_4view"),
         "plot_surface_comparison": ("corticalfields.brainplots", "plot_surface_comparison"),
         "plot_surprise_brain": ("corticalfields.brainplots", "plot_surprise_brain"),
@@ -105,11 +142,9 @@ def __getattr__(name: str):
         "plot_subcortical_3d": ("corticalfields.brainplots", "plot_subcortical_3d"),
         "plot_composite_figure": ("corticalfields.brainplots", "plot_composite_figure"),
         "save_figure": ("corticalfields.brainplots", "save_figure"),
-        # viz.py — quick scatter / trisurf brain visualization
         "plot_brain_scatter": ("corticalfields.viz", "plot_brain_scatter"),
-        # brainplots.py — PyVista BrainSpace-style lateral + medial views
         "plot_brain_views": ("corticalfields.brainplots", "plot_brain_views"),
-        # datasets.py (toy dataset download — lightweight, stdlib only)
+        # datasets.py
         "fetch_toy_dataset": ("corticalfields.datasets", "fetch_toy_dataset"),
         "clear_toy_dataset": ("corticalfields.datasets", "clear_toy_dataset"),
         "load_example_surface": ("corticalfields.datasets", "load_example_surface"),
@@ -124,28 +159,43 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    # Surface
     "CorticalSurface", "load_freesurfer_surface",
+    # Spectral
     "LaplaceBeltrami", "heat_kernel_signature",
     "wave_kernel_signature", "global_point_signature",
-    "SpectralMaternKernel",
-    "CorticalNormativeModel",
-    "SurpriseMap", "compute_surprise",
-    "MorphometricProfile",
-    # FreeSurfer-free cortical extraction
+    # Kernels / Normative / Surprise
+    "SpectralMaternKernel", "CorticalNormativeModel",
+    "SurpriseMap", "compute_surprise", "MorphometricProfile",
+    # Pointcloud
     "from_t1w", "T1wExtractionResult",
     "compute_mesh_laplacian", "compute_mesh_eigenpairs",
-    # EDA, QC, outlier detection
+    # EDA/QC
     "run_clinical_eda", "run_spectral_eda",
     "detect_clinical_outliers", "mcd_mahalanobis_outliers",
     "distance_matrix_outliers", "generate_midthickness",
     "QCReport", "EDAResult",
-    # Subcortical surface extraction + spectral pipeline
+    # ─── Subcortical (enhanced v0.2.0) ───
     "SubcorticalSurface", "load_subcortical_surface",
-    "load_subcortical_from_nifti", "subcortical_spectral_analysis",
-    "FS_ASEG_LABELS", "estimate_n_eigenpairs",
-    # GPU/VRAM management
-    "gc_gpu", "vram_report", "vram_guard",
-    # Brain visualization (publication-grade)
+    "load_subcortical_from_nifti", "load_all_subcortical",
+    "subcortical_spectral_analysis",
+    "shapedna_distance", "wasserstein_shape_distance", "brainprint_distance",
+    "batch_shape_descriptors", "batch_shapedna",
+    "pairwise_shapedna_distance_matrix",
+    "FS_ASEG_LABELS", "FS_THALAMIC_NUCLEI",
+    # ─── Hippocampus (NEW v0.2.0) ───
+    "HippocampalSurface", "load_hippocampal_surface",
+    "hippocampal_asymmetry_report", "hippocampal_spectral_analysis",
+    "HIPPUNFOLD_SUBFIELDS", "ILAE_HS_TYPES",
+    # ─── Visualization subcortical + hippocampal (NEW v0.2.0) ───
+    "plot_subcortical_multiview", "plot_subcortical_composite",
+    "plot_hippocampal_foldunfold", "plot_hippocampal_comparison",
+    "plot_subfield_metrics", "plot_subfield_asymmetry",
+    "plot_ap_profile", "plot_zscore_surface",
+    "plot_shapedna_comparison", "plot_point_cloud_3d",
+    # Utils
+    "estimate_n_eigenpairs", "gc_gpu", "vram_report", "vram_guard",
+    # Brain visualization (existing)
     "plot_surface_4view", "plot_surface_comparison",
     "plot_surprise_brain", "plot_normative_result",
     "plot_hks_multiscale", "plot_asymmetry_brain",
@@ -156,9 +206,8 @@ __all__ = [
     "plot_network_graph", "plot_asymmetry_bands",
     "plot_krr_diagnostic", "plot_subcortical_3d",
     "plot_composite_figure", "save_figure",
-    # Quick brain scatter + PyVista brain views
     "plot_brain_scatter", "plot_brain_views",
-    # Toy dataset download
+    # Datasets
     "fetch_toy_dataset", "clear_toy_dataset",
     "load_example_surface", "ToyDataset",
 ]
