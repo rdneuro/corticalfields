@@ -334,8 +334,15 @@ def sinkhorn_divergence(
     else:
         value = loss_fn(x, y)
 
+    distance = float(value.item())
+
+    # ── VRAM cleanup: GeomLoss/KeOps may hold intermediate buffers ───
+    del x, y, value, loss_fn
+    if dev.type == "cuda":
+        torch.cuda.empty_cache()
+
     return TransportResult(
-        distance=float(value.item()),
+        distance=distance,
         method="sinkhorn",
         metadata={
             "blur": blur,
@@ -726,8 +733,17 @@ def fugw_alignment(
         target_selection_radius=radius,
     )
 
+    distance = float(mapping.loss)
+
+    # ── VRAM cleanup: FUGW holds intermediate torch tensors ──────────
+    del sf, tf, sg, tg, mapping
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return TransportResult(
-        distance=float(mapping.loss),
+        distance=distance,
         method="fugw",
         metadata={
             "alpha": alpha,
@@ -757,7 +773,11 @@ def _wasserstein_kernel_torch(
         K_t = torch.exp(-gamma * D_t)
     else:
         raise ValueError(f"Unknown kernel type: {kernel_type!r}")
-    return K_t.cpu().numpy()
+    result = K_t.cpu().numpy()
+    del D_t, K_t
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return result
 
 
 def _wasserstein_kernel_cupy(
@@ -772,4 +792,7 @@ def _wasserstein_kernel_cupy(
         K_c = cp.exp(-gamma * D_c)
     else:
         raise ValueError(f"Unknown kernel type: {kernel_type!r}")
-    return cp.asnumpy(K_c)
+    result = cp.asnumpy(K_c)
+    del D_c, K_c
+    cp.get_default_memory_pool().free_all_blocks()
+    return result

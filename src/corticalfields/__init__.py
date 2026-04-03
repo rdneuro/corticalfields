@@ -81,6 +81,9 @@ def __getattr__(name: str):
         "FS_ASEG_LABELS": ("corticalfields.subcortical", "FS_ASEG_LABELS"),
         # utils.py additions
         "estimate_n_eigenpairs": ("corticalfields.utils", "estimate_n_eigenpairs"),
+        "gc_gpu": ("corticalfields.utils", "gc_gpu"),
+        "vram_report": ("corticalfields.utils", "vram_report"),
+        "vram_guard": ("corticalfields.utils", "vram_guard"),
         # brainplots.py (publication-grade visualization — pyvista + matplotlib)
         "plot_surface_4view": ("corticalfields.brainplots", "plot_surface_4view"),
         "plot_surface_comparison": ("corticalfields.brainplots", "plot_surface_comparison"),
@@ -140,6 +143,8 @@ __all__ = [
     "SubcorticalSurface", "load_subcortical_surface",
     "load_subcortical_from_nifti", "subcortical_spectral_analysis",
     "FS_ASEG_LABELS", "estimate_n_eigenpairs",
+    # GPU/VRAM management
+    "gc_gpu", "vram_report", "vram_guard",
     # Brain visualization (publication-grade)
     "plot_surface_4view", "plot_surface_comparison",
     "plot_surprise_brain", "plot_normative_result",

@@ -36,7 +36,7 @@ def timer(label: str = ""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GPU detection
+# GPU detection & VRAM management
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -65,6 +65,94 @@ def get_device(prefer_cuda: bool = True) -> "torch.device":
         logger.info("Using CPU device.")
 
     return device
+
+
+def gc_gpu() -> None:
+    """
+    Aggressively free GPU memory across all available backends.
+
+    Calls ``torch.cuda.empty_cache()``, ``cupy.get_default_memory_pool().free_all_blocks()``,
+    and Python garbage collector. Safe to call even when no GPU or backends are available.
+    """
+    import gc
+    gc.collect()
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+    try:
+        import cupy as cp
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except (ImportError, Exception):
+        pass
+
+
+def vram_report() -> dict:
+    """
+    Report current GPU VRAM usage.
+
+    Returns
+    -------
+    dict
+        Keys: ``total_gb``, ``allocated_gb``, ``reserved_gb``, ``free_gb``,
+        ``device_name``. Returns empty dict if no GPU is available.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return {}
+        props = torch.cuda.get_device_properties(0)
+        total = props.total_memory
+        allocated = torch.cuda.memory_allocated(0)
+        reserved = torch.cuda.memory_reserved(0)
+        return {
+            "device_name": props.name,
+            "total_gb": total / (1024 ** 3),
+            "allocated_gb": allocated / (1024 ** 3),
+            "reserved_gb": reserved / (1024 ** 3),
+            "free_gb": (total - allocated) / (1024 ** 3),
+        }
+    except ImportError:
+        return {}
+
+
+@contextmanager
+def vram_guard(label: str = ""):
+    """
+    Context manager that clears GPU caches before and after a block.
+
+    Useful for wrapping GPU-intensive operations on VRAM-constrained
+    devices (e.g. 8 GB RTX 4070 laptop).
+
+    Parameters
+    ----------
+    label : str
+        Label for logging.
+
+    Examples
+    --------
+    >>> with vram_guard("eigensolver"):
+    ...     evals, evecs = eigsh_solve(L, M, k=300, backend="torch")
+    """
+    gc_gpu()
+    before = vram_report()
+    if before and label:
+        logger.info("[VRAM %s] before: %.2f/%.1f GB allocated",
+                    label, before["allocated_gb"], before["total_gb"])
+    try:
+        yield
+    finally:
+        gc_gpu()
+        after = vram_report()
+        if after and label:
+            logger.info("[VRAM %s] after cleanup: %.2f/%.1f GB allocated",
+                        label, after["allocated_gb"], after["total_gb"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -535,8 +535,10 @@ def zoomout_refine(
     if backend == "cupy":
         try:
             import cupy as cp
-            phi_src_g = cp.asarray(phi_src, dtype=cp.float32)
-            phi_tgt_g = cp.asarray(phi_tgt, dtype=cp.float32)
+
+            # VRAM optimisation: same streaming strategy as torch path —
+            # do NOT upload full eigenvector matrices to GPU.  Stream only
+            # the k_current columns needed per iteration.
             C_g = cp.asarray(C, dtype=cp.float32)
 
             for it in range(n_iterations):
@@ -544,36 +546,41 @@ def zoomout_refine(
                 k_old_tgt = C_g.shape[0]
                 k_old_src = C_g.shape[1]
 
-                # 1. Spectral embeddings
-                emb_tgt = cp.asnumpy(phi_tgt_g[:, :k_old_tgt] @ C_g)
-                emb_src = cp.asnumpy(phi_src_g[:, :k_old_src])
+                # 1. Upload only needed slice for embedding
+                phi_tgt_slice = cp.asarray(phi_tgt[:, :k_old_tgt], dtype=cp.float32)
+                emb_tgt = cp.asnumpy(phi_tgt_slice @ C_g)
+                del phi_tgt_slice
+                emb_src = phi_src[:, :k_old_src]  # stays on CPU
 
                 # 2. GPU nearest-neighbour
                 p2p = _nearest_neighbour_map(emb_tgt, emb_src,
                                              chunk_size=8192, backend="cupy")
 
-                # 3. Pull-back + Procrustes on GPU
-                phi_src_k = phi_src_g[:, :k_current]
-                phi_tgt_k = phi_tgt_g[:, :k_current]
+                # 3. Upload k_current columns for Procrustes
+                phi_src_k = cp.asarray(phi_src[:, :k_current], dtype=cp.float32)
+                phi_tgt_k = cp.asarray(phi_tgt[:, :k_current], dtype=cp.float32)
                 phi_src_pulled = phi_src_k[cp.asarray(p2p)]  # (N_tgt, k_current)
+                del phi_src_k
 
                 if _mass_is_identity or M_tgt is None:
                     C_g = phi_tgt_k.T @ phi_src_pulled
                 else:
-                    # Sparse mass multiply on CPU, rest on GPU
                     M_phi = cp.asarray((M_tgt @ phi_tgt[:, :k_current]).astype(np.float32))
                     C_g = M_phi.T @ phi_src_pulled
+                    del M_phi
+                del phi_tgt_k, phi_src_pulled
 
                 # SVD for nearest orthogonal (Procrustes)
                 U, _, Vt = cp.linalg.svd(C_g, full_matrices=False)
                 C_g = U @ Vt
+                del U, Vt
 
                 logger.info("  ZoomOut iter %d/%d: k=%d, off-diag=%.4f",
                             it + 1, n_iterations, k_current,
                             _off_diagonal_frobenius(cp.asnumpy(C_g)))
 
             C = cp.asnumpy(C_g).astype(np.float64)
-            del phi_src_g, phi_tgt_g, C_g
+            del C_g
             cp.get_default_memory_pool().free_all_blocks()
 
             return FunctionalMap(
@@ -601,8 +608,12 @@ def zoomout_refine(
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             logger.info("  ZoomOut torch backend on %s", device)
 
-            phi_src_t = torch.tensor(phi_src, dtype=torch.float32, device=device)
-            phi_tgt_t = torch.tensor(phi_tgt, dtype=torch.float32, device=device)
+            # VRAM optimisation: Do NOT upload full (N, K_all) eigenvector
+            # matrices to GPU.  Each iteration only needs columns 0:k_current,
+            # so we stream the needed slice from CPU each iteration.  For a
+            # 150k-vertex mesh with K=300, the full matrix is 180 MB (float32)
+            # PER hemisphere — uploading both wastes 360 MB of VRAM that is
+            # never fully used in any single iteration.
             C_t = torch.tensor(C, dtype=torch.float32, device=device)
 
             for it in range(n_iterations):
@@ -610,40 +621,51 @@ def zoomout_refine(
                 k_old_tgt = C_t.shape[0]
                 k_old_src = C_t.shape[1]
 
-                # 1. Spectral embeddings → numpy for NN dispatch
-                emb_tgt = (phi_tgt_t[:, :k_old_tgt] @ C_t).cpu().numpy()
-                emb_src = phi_src_t[:, :k_old_src].cpu().numpy()
+                # 1. Upload ONLY the needed columns for embedding computation
+                phi_tgt_slice = torch.tensor(
+                    phi_tgt[:, :k_old_tgt], dtype=torch.float32, device=device
+                )
+                emb_tgt = (phi_tgt_slice @ C_t).cpu().numpy()
+                del phi_tgt_slice
+                emb_src = phi_src[:, :k_old_src]  # stays on CPU (numpy)
 
                 # 2. GPU nearest-neighbour via torch
                 p2p = _nearest_neighbour_map(emb_tgt, emb_src,
                                              chunk_size=8192, backend="torch")
 
-                # 3. Pull-back + Procrustes on GPU
-                phi_src_k = phi_src_t[:, :k_current]
-                phi_tgt_k = phi_tgt_t[:, :k_current]
+                # 3. Upload k_current columns for Procrustes
+                phi_src_k = torch.tensor(
+                    phi_src[:, :k_current], dtype=torch.float32, device=device
+                )
+                phi_tgt_k = torch.tensor(
+                    phi_tgt[:, :k_current], dtype=torch.float32, device=device
+                )
                 p2p_t = torch.tensor(p2p, dtype=torch.long, device=device)
                 phi_src_pulled = phi_src_k[p2p_t]  # (N_tgt, k_current)
+                del phi_src_k, p2p_t
 
                 if _mass_is_identity or M_tgt is None:
                     C_t = phi_tgt_k.T @ phi_src_pulled
                 else:
-                    # Sparse mass multiply on CPU, rest on GPU
                     M_phi = torch.tensor(
                         (M_tgt @ phi_tgt[:, :k_current]).astype(np.float32),
                         dtype=torch.float32, device=device,
                     )
                     C_t = M_phi.T @ phi_src_pulled
+                    del M_phi
+                del phi_tgt_k, phi_src_pulled
 
                 # SVD for nearest orthogonal (Procrustes)
                 U, _, Vt = torch.linalg.svd(C_t, full_matrices=False)
                 C_t = U @ Vt
+                del U, Vt
 
                 logger.info("  ZoomOut iter %d/%d: k=%d, off-diag=%.4f",
                             it + 1, n_iterations, k_current,
                             _off_diagonal_frobenius(C_t.cpu().numpy()))
 
             C = C_t.cpu().numpy().astype(np.float64)
-            del phi_src_t, phi_tgt_t, C_t
+            del C_t
             torch.cuda.empty_cache()
 
             return FunctionalMap(
@@ -988,6 +1010,7 @@ def _nearest_neighbour_map(
                 p2p[start:end] = cp.asnumpy(cp.argmin(dist, axis=1))
                 del tgt, dist
             del src, src_sq
+            cp.get_default_memory_pool().free_all_blocks()
             return p2p
         except ImportError:
             logger.warning("CuPy unavailable for NN — falling back to CPU")
@@ -996,6 +1019,16 @@ def _nearest_neighbour_map(
         try:
             import torch
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+            # Adapt chunk size to available VRAM for 8 GB devices
+            if device.type == "cuda":
+                free_mem = (torch.cuda.get_device_properties(0).total_memory
+                            - torch.cuda.memory_allocated(0))
+                # Each chunk row needs: D floats (source) + N_src floats (distances)
+                row_bytes = (emb_source.shape[1] + emb_source.shape[0]) * 4  # float32
+                safe_chunk = max(1000, int(free_mem * 0.3 / max(row_bytes, 1)))
+                chunk_size = min(chunk_size, safe_chunk)
+
             src = torch.tensor(emb_source, dtype=torch.float32, device=device)
             src_sq = torch.sum(src ** 2, dim=1)
             p2p = np.empty(N, dtype=np.int64)
@@ -1006,6 +1039,8 @@ def _nearest_neighbour_map(
                 p2p[start:end] = torch.argmin(dist, dim=1).cpu().numpy()
                 del tgt, dist
             del src, src_sq
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
             return p2p
         except ImportError:
             logger.warning("PyTorch unavailable for NN — falling back to CPU")
@@ -1103,10 +1138,15 @@ def _solve_functional_map_torch(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt
     idx = torch.arange(k_src, device=device)
     diag_batch[:, idx, idx] = alpha_lap * ev_t
     lhs_batch = G_t.unsqueeze(0).expand(k_tgt, -1, -1) + diag_batch
+    del G_t, ev_t, diag_batch
 
     # Batched solve: lhs_batch @ C_rows = rhs
     C_t = torch.linalg.solve(lhs_batch, rhs_t.unsqueeze(-1)).squeeze(-1)
-    return C_t.cpu().numpy()
+    result = C_t.cpu().numpy()
+    del C_t, lhs_batch, rhs_t
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return result
 
 
 def _solve_functional_map_cupy(G, rhs, ev_diff_sq, alpha_desc, alpha_lap, k_tgt, k_src):

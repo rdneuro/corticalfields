@@ -684,3 +684,22 @@ class CorticalNormativeModel:
         self._likelihood = self._likelihood.to(self.device)
         self._is_fitted = True
         logger.info("Model loaded from %s", path)
+
+    def release_gpu(self) -> None:
+        """
+        Move model and likelihood to CPU and free GPU VRAM.
+
+        Call this after prediction when processing multiple features
+        sequentially to free VRAM between features. The model remains
+        usable on CPU (slower) or can be moved back with
+        ``model._model.to('cuda')``.
+        """
+        if self._model is not None:
+            self._model = self._model.cpu()
+        if self._likelihood is not None:
+            self._likelihood = self._likelihood.cpu()
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("NormativeModel: GPU resources released.")

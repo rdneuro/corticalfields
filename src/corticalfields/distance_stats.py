@@ -847,6 +847,11 @@ def _mdmr_permute_torch(
         if ss_resid > 1e-12 and df_model > 0 and df_residual > 0:
             null_F[perm] = float((ss_model / df_model) / (ss_resid / df_residual))
 
+    # Cleanup GPU tensors
+    del G_t, X_f, X_r, Q_f, Q_r, H_f, H_r
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
     return null_F
 
 
@@ -890,5 +895,9 @@ def _mdmr_permute_cupy(
 
         if ss_resid > 1e-12 and df_model > 0 and df_residual > 0:
             null_F[perm] = (ss_model / df_model) / (ss_resid / df_residual)
+
+    # Cleanup GPU arrays
+    del G_c, X_f, X_r, Q_f, Q_r, H_f, H_r
+    cp.get_default_memory_pool().free_all_blocks()
 
     return null_F

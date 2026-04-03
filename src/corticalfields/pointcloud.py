@@ -523,6 +523,20 @@ def _from_t1w_morphological(
                     [str(t1w_path)], [brain_path], [mask_path],
                     threshold=0.5, no_gpu=False,
                 )
+                # ── VRAM cleanup: deepbet loads a U-Net into GPU memory
+                # and does NOT release it.  Force-collect the model and
+                # empty the CUDA cache so downstream functions can use
+                # the 8 GB VRAM budget.
+                import gc
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+                logger.info("  deepbet model unloaded from VRAM.")
             except ImportError:
                 raise ImportError(
                     "deepbet is required for brain extraction. "
@@ -572,6 +586,26 @@ def _from_t1w_morphological(
         cortical_mask = (seg == 2).astype(bool)  # label 2 = cortical GM
         cortical_mask = binary_fill_holes(cortical_mask)
         logger.info("  Cortical GM: %d voxels", cortical_mask.sum())
+
+        # ── VRAM cleanup: deep_atropos loads TF/Keras models into GPU.
+        # Force-release so downstream torch operations can use the VRAM.
+        del result, t1_ants
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        # Also try to clear TensorFlow GPU memory if antspynet used TF
+        try:
+            import tensorflow as tf
+            tf.keras.backend.clear_session()
+        except (ImportError, Exception):
+            pass
+        logger.info("  antspynet models unloaded from VRAM.")
     else:
         logger.info("Step 2: Distance-transform cortical shell (%.1f mm)...",
                      cortical_thickness_mm)
