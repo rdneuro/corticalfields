@@ -198,8 +198,18 @@ jobs:
       - name: Upload to GitHub Release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          gh release upload
-          "${{ github.ref_name }}"
-          dist/**
-          --repo "${{ github.repository }}"
+        run: |
+          # Delete existing assets with the same names
+          gh release delete-asset "${{ github.ref_name }}" \
+            corticalfields-0.2.0-py3-none-any.whl \
+            corticalfields-0.2.0-py3-none-any.whl.sigstore.json \
+            corticalfields-0.2.0.tar.gz \
+            corticalfields-0.2.0.tar.gz.sigstore.json \
+            --repo "${{ github.repository }}" \
+            2>/dev/null || true
+          
+          # Upload the new assets
+          gh release upload \
+            "${{ github.ref_name }}" \
+            dist/** \
+            --repo "${{ github.repository }}"
