@@ -6,7 +6,7 @@ functional maps, optimal-transport distances, and information-theoretic
 surprise maps on brain surface meshes.  Designed for structural MRI (T1w)
 data in clinical neuroimaging, with emphasis on epilepsy (MTLE-HS).
 
-Subpackages (v0.3.0)
+Subpackages (v0.2.0)
 ---------------------
 analysis       : Statistical analysis & modeling
     analysis.stats      — MCC, GLM, PERMANOVA, CCA/PLS, RSA, NBS,
@@ -29,7 +29,7 @@ surface, subcortical, hippocampus, spectral, kernels, surprise, features,
 graphs, distance_stats, asymmetry, transport, functional_maps, datasets, utils
 """
 
-__version__ = "0.3.0"
+__version__ = "0.2.0"
 __author__ = "rdneuro"
 
 
