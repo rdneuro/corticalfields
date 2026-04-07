@@ -1263,3 +1263,7 @@ def generate_midthickness(
         raise ValueError(f"Unknown method: {method!r}")
 
     return midthick_path
+
+
+# Aliases for naming consistency
+weyl_law_check = weyls_law_check

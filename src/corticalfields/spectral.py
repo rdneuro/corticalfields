@@ -479,6 +479,7 @@ def spectral_feature_matrix(
     include_hks: bool = True,
     include_wks: bool = True,
     include_gps: bool = True,
+    backend: str = "auto",
 ) -> np.ndarray:
     """
     Build a combined per-vertex spectral feature matrix.
@@ -493,6 +494,9 @@ def spectral_feature_matrix(
         Dimensionality of each descriptor block.
     include_hks, include_wks, include_gps : bool
         Which descriptors to include.
+    backend : str
+        Accepted for API consistency.  Descriptor computation uses NumPy
+        (matrix multiplications on the precomputed eigenvector basis).
 
     Returns
     -------

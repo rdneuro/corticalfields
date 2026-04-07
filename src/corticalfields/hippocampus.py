@@ -97,6 +97,8 @@ class HippocampalSurface(SubcorticalSurface):
         return self.vertices[self.subfield_mask(subfield)]
 
     def subfield_areas(self):
+        if self.subfield_labels.size == 0 or self.subfield_labels.max() == 0:
+            return {n: 0.0 for n in HIPPUNFOLD_SUBFIELDS}
         fa = self.face_areas
         fl = np.zeros(self.n_faces, dtype=np.int32)
         for i in range(self.n_faces):
@@ -453,29 +455,55 @@ def load_hippocampal_surface(hippunfold_dir, subject_id, hemi="lh", *, density="
 # ===================================================================
 
 def hippocampal_asymmetry_report(ipsi, contra):
-    """Comprehensive asymmetry report for MTLE-HS lateralisation."""
+    """Comprehensive asymmetry report for MTLE-HS lateralisation.
+
+    Accepts both HippocampalSurface and SubcorticalSurface.  Subfield-level
+    asymmetry indices are only included when both surfaces are HippocampalSurface
+    instances with populated subfield_labels.
+    """
     report = {"volume_ai": ipsi.volume_asymmetry_index(contra.enclosed_volume)}
     d = ipsi.total_area + contra.total_area
     report["area_ai"] = 2*(ipsi.total_area-contra.total_area)/d if abs(d) > 1e-12 else 0.0
-    report["subfield_area_ai"] = ipsi.subfield_asymmetry_indices(contra, "area")
-    if "thickness" in ipsi.overlays and "thickness" in contra.overlays:
-        report["subfield_thickness_ai"] = ipsi.subfield_asymmetry_indices(contra, "thickness")
-        try: report["vertex_asym_map"] = ipsi.vertex_asymmetry_map(contra, "thickness")
-        except ValueError as e: logger.warning("Vertex asym failed: %s", e)
+
+    # Shape metrics
+    report["sphericity_ipsi"] = ipsi.sphericity
+    report["sphericity_contra"] = contra.sphericity
+    report["elongation_ipsi"] = ipsi.elongation
+    report["elongation_contra"] = contra.elongation
+
+    # Subfield metrics — only for HippocampalSurface with labels
+    _has_subfields = (
+        isinstance(ipsi, HippocampalSurface) and isinstance(contra, HippocampalSurface)
+        and ipsi.subfield_labels.size > 0 and ipsi.subfield_labels.max() > 0
+        and contra.subfield_labels.size > 0 and contra.subfield_labels.max() > 0
+    )
+    if _has_subfields:
+        report["subfield_area_ai"] = ipsi.subfield_asymmetry_indices(contra, "area")
+        if "thickness" in ipsi.overlays and "thickness" in contra.overlays:
+            report["subfield_thickness_ai"] = ipsi.subfield_asymmetry_indices(contra, "thickness")
+            try: report["vertex_asym_map"] = ipsi.vertex_asymmetry_map(contra, "thickness")
+            except ValueError as e: logger.warning("Vertex asym failed: %s", e)
     return report
 
 def hippocampal_spectral_analysis(surf, *, n_eigenpairs=None, hks_scales=16,
                                   wks_energies=16, compute_curvatures=True,
                                   backend="auto", device="auto"):
-    """Full spectral + shape + subfield pipeline for a hippocampal surface."""
+    """Full spectral + shape + subfield pipeline for a hippocampal surface.
+
+    Accepts both HippocampalSurface and SubcorticalSurface.  Subfield-specific
+    metrics (subfield_areas, subfield_thickness, ap_thickness_profile) are only
+    included when *surf* is a HippocampalSurface with populated subfield_labels.
+    """
     from corticalfields.subcortical import subcortical_spectral_analysis
     results = subcortical_spectral_analysis(
         surf, n_eigenpairs=n_eigenpairs, hks_scales=hks_scales, wks_energies=wks_energies,
         compute_curvatures=compute_curvatures, compute_principal=True, compute_shapedna=True,
         backend=backend, device=device)
-    results["subfield_areas"] = surf.subfield_areas()
-    if "thickness" in surf.overlays:
-        results["subfield_thickness"] = surf.subfield_mean_thickness()
-        if surf.ap_coord is not None:
-            results["ap_thickness_profile"] = surf.ap_profile("thickness", n_bins=20)
+    # Subfield metrics — only for HippocampalSurface with labels
+    if isinstance(surf, HippocampalSurface) and surf.subfield_labels.size > 0 and surf.subfield_labels.max() > 0:
+        results["subfield_areas"] = surf.subfield_areas()
+        if "thickness" in surf.overlays:
+            results["subfield_thickness"] = surf.subfield_mean_thickness()
+            if surf.ap_coord is not None:
+                results["ap_thickness_profile"] = surf.ap_profile("thickness", n_bins=20)
     return results

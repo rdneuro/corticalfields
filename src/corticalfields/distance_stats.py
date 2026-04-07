@@ -104,6 +104,14 @@ class StatisticalResult:
             f"p={self.p_value:.4f} {sig}{es_str})"
         )
 
+    def __float__(self) -> float:
+        return float(self.statistic)
+
+    def __format__(self, format_spec: str) -> str:
+        if format_spec:
+            return format(self.statistic, format_spec)
+        return str(self)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MDMR — Multivariate Distance Matrix Regression

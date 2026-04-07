@@ -91,6 +91,14 @@ class StatResult:
     description: str = ""
     extras: Dict[str, Any] = field(default_factory=dict)
 
+    def __float__(self) -> float:
+        return float(self.statistic)
+
+    def __format__(self, format_spec: str) -> str:
+        if format_spec:
+            return format(self.statistic, format_spec)
+        return repr(self)
+
 
 @dataclass
 class MultipleComparisonResult:
@@ -117,6 +125,10 @@ class MultipleComparisonResult:
     alpha: float = 0.05
     method: str = ""
     extras: Dict[str, Any] = field(default_factory=dict)
+
+    def __iter__(self):
+        """Allow tuple unpacking: ``reject, corrected = fdr_correction(...)``."""
+        return iter((self.rejected, self.p_values_corrected))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
