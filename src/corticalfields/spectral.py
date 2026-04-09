@@ -50,8 +50,20 @@ References
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+import time
+import warnings
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 import scipy.sparse as sp
@@ -289,6 +301,763 @@ def compute_eigenpairs(
         mass=M,
         eigenvalues=eigenvalues,
         eigenvectors=eigenvectors,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch eigenpair computation with memory-aware parallelism
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class MemoryEstimate:
+    """Per-subject memory estimate (in bytes) for eigenpair computation.
+
+    Attributes
+    ----------
+    ram_bytes : int
+        Predicted host RAM consumption.
+    vram_bytes : int
+        Predicted GPU VRAM consumption (0 for CPU backends).
+    n_vertices : int
+        Vertex count used for the estimate.
+    n_eigenpairs : int
+        Eigenpair count used for the estimate.
+    backend : str
+        Backend string (``"scipy"``, ``"torch"``, ``"cupy"``).
+    """
+
+    ram_bytes: int
+    vram_bytes: int
+    n_vertices: int
+    n_eigenpairs: int
+    backend: str
+
+    @property
+    def ram_gb(self) -> float:
+        return self.ram_bytes / (1024 ** 3)
+
+    @property
+    def vram_gb(self) -> float:
+        return self.vram_bytes / (1024 ** 3)
+
+    def __repr__(self) -> str:
+        return (
+            f"MemoryEstimate(RAM={self.ram_gb:.2f} GB, "
+            f"VRAM={self.vram_gb:.2f} GB, "
+            f"V={self.n_vertices}, K={self.n_eigenpairs}, "
+            f"backend={self.backend!r})"
+        )
+
+
+def estimate_memory_per_subject(
+    n_vertices: int,
+    n_eigenpairs: int = 300,
+    backend: str = "scipy",
+) -> MemoryEstimate:
+    """
+    Predict RAM and VRAM usage for a single eigenpair computation.
+
+    The model accounts for:
+
+    - **Sparse matrices** (L, M): stiffness has ~7 non-zeros per row
+      for a triangle mesh (cotangent weights); mass is diagonal.
+      With CSC storage overhead: ``(7 · N · 16 + N · 16)`` bytes
+      ≈ ``128 · N``.
+    - **Eigenvectors**: ``N × K × 8`` bytes (float64).
+    - **Solver workspace**: ARPACK needs ≈ ``3 × N × K × 8`` bytes for
+      Lanczos vectors; LOBPCG (torch/cupy) needs ≈ ``5 × N × K × 8``
+      for X, W, P blocks plus temporaries.
+    - **Safety factor**: 1.3× to cover Python object overhead,
+      temporaries during Laplacian assembly, and backend-specific
+      allocations.
+
+    For GPU backends the VRAM estimate includes eigenvectors + workspace
+    on device, plus 0.5× sparse cost for partial dense transfers that
+    LOBPCG may perform internally.
+
+    Parameters
+    ----------
+    n_vertices : int
+        Number of mesh vertices.
+    n_eigenpairs : int
+        Number of eigenpairs to compute.
+    backend : str
+        ``"scipy"``, ``"torch"``, or ``"cupy"``.
+
+    Returns
+    -------
+    MemoryEstimate
+    """
+    N, K = n_vertices, n_eigenpairs
+    DTYPE_SIZE = 8  # float64
+
+    sparse_bytes = int(128 * N)
+    evec_bytes = N * K * DTYPE_SIZE
+
+    workspace_multiplier = 3 if backend == "scipy" else 5
+    workspace_bytes = workspace_multiplier * N * K * DTYPE_SIZE
+
+    SAFETY = 1.3
+    ram_total = int((sparse_bytes + evec_bytes + workspace_bytes) * SAFETY)
+
+    if backend in ("torch", "cupy"):
+        vram_total = int(
+            (evec_bytes + workspace_bytes + 0.5 * sparse_bytes) * SAFETY
+        )
+    else:
+        vram_total = 0
+
+    return MemoryEstimate(
+        ram_bytes=ram_total,
+        vram_bytes=vram_total,
+        n_vertices=N,
+        n_eigenpairs=K,
+        backend=backend,
+    )
+
+
+def _get_system_free_ram_bytes() -> int:
+    """Return free RAM in bytes (psutil → /proc/meminfo → 8 GB fallback)."""
+    try:
+        import psutil
+        return psutil.virtual_memory().available
+    except ImportError:
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except FileNotFoundError:
+        pass
+    warnings.warn(
+        "Cannot determine free RAM; assuming 8 GB. "
+        "Install psutil for accuracy.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return 8 * (1024 ** 3)
+
+
+def _get_gpu_free_vram_bytes() -> int:
+    """Return free VRAM in bytes (torch → cupy → 0)."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            total = props.total_memory  # NOT .total_mem
+            allocated = torch.cuda.memory_allocated(0)
+            return total - allocated
+    except ImportError:
+        pass
+    try:
+        import cupy as cp
+        free, _total = cp.cuda.Device(0).mem_info
+        return free
+    except (ImportError, Exception):
+        pass
+    return 0
+
+
+def compute_safe_parallelism(
+    n_vertices: int,
+    n_eigenpairs: int = 300,
+    backend: str = "scipy",
+    requested_n_jobs: int = 1,
+    requested_batch_size: int = 1,
+    ram_reserve_gb: float = 2.0,
+    vram_reserve_gb: float = 1.0,
+) -> Tuple[int, int, MemoryEstimate]:
+    """
+    Compute safe ``n_jobs`` and ``batch_size`` for batch eigenpairs.
+
+    Estimates per-subject memory, queries system free RAM / VRAM, and
+    clamps the user-requested parallelism to avoid OOM.
+
+    Parameters
+    ----------
+    n_vertices : int
+        Representative vertex count (use the largest subject).
+    n_eigenpairs : int
+        Number of eigenpairs per subject.
+    backend : str
+        Eigensolver backend string.
+    requested_n_jobs : int
+        Desired joblib parallelism (CPU backend only).
+    requested_batch_size : int
+        Desired GPU batch size (torch/cupy only).
+    ram_reserve_gb : float
+        RAM headroom to leave untouched.
+    vram_reserve_gb : float
+        VRAM headroom to leave untouched.
+
+    Returns
+    -------
+    safe_n_jobs : int
+        Clamped ``n_jobs`` (always 1 for GPU backends).
+    safe_batch_size : int
+        Clamped ``batch_size`` (always 1 for scipy backend).
+    estimate : MemoryEstimate
+        Per-subject memory estimate used for the calculation.
+    """
+    est = estimate_memory_per_subject(n_vertices, n_eigenpairs, backend)
+
+    if backend == "scipy":
+        free_ram = _get_system_free_ram_bytes()
+        usable_ram = max(
+            free_ram - int(ram_reserve_gb * (1024 ** 3)), est.ram_bytes,
+        )
+        max_parallel = max(1, int(usable_ram / est.ram_bytes))
+        safe_jobs = min(requested_n_jobs, max_parallel)
+
+        if safe_jobs < requested_n_jobs:
+            logger.warning(
+                "Clamped n_jobs %d → %d (free RAM: %.1f GB, "
+                "per-subject: %.2f GB, reserve: %.1f GB)",
+                requested_n_jobs, safe_jobs,
+                free_ram / (1024 ** 3), est.ram_gb, ram_reserve_gb,
+            )
+        return safe_jobs, 1, est
+
+    # GPU backends: limit batch_size by VRAM
+    free_vram = _get_gpu_free_vram_bytes()
+    if free_vram == 0:
+        logger.warning(
+            "No GPU VRAM detected for backend=%r; falling back to "
+            "sequential processing (batch_size=1).",
+            backend,
+        )
+        return 1, 1, est
+
+    usable_vram = max(
+        free_vram - int(vram_reserve_gb * (1024 ** 3)), est.vram_bytes,
+    )
+    max_parallel = max(1, int(usable_vram / est.vram_bytes))
+    safe_batch = min(requested_batch_size, max_parallel)
+
+    if safe_batch < requested_batch_size:
+        logger.warning(
+            "Clamped batch_size %d → %d (free VRAM: %.1f GB, "
+            "per-subject: %.2f GB, reserve: %.1f GB)",
+            requested_batch_size, safe_batch,
+            free_vram / (1024 ** 3), est.vram_gb, vram_reserve_gb,
+        )
+
+    return 1, safe_batch, est
+
+
+@dataclass
+class SubjectMesh:
+    """
+    Lightweight container for one subject's mesh data.
+
+    Parameters
+    ----------
+    subject_id : str
+        Identifier (used for cache filenames and logging).
+    vertices : np.ndarray, shape (N, 3)
+        Mesh vertex coordinates.
+    faces : np.ndarray, shape (F, 3)
+        Triangle connectivity.
+    """
+
+    subject_id: str
+    vertices: np.ndarray
+    faces: np.ndarray
+
+    @property
+    def n_vertices(self) -> int:
+        return self.vertices.shape[0]
+
+
+def _process_single_subject(
+    subject: SubjectMesh,
+    n_eigenpairs: int,
+    use_robust: bool,
+    sigma: float,
+    backend: str,
+    cache_dir: Optional[Path],
+    save_matrices: bool,
+) -> Tuple[str, Optional[LaplaceBeltrami]]:
+    """
+    Compute eigenpairs for one subject with optional disk caching.
+
+    Returns ``(subject_id, LaplaceBeltrami | None)``.
+    Returns ``None`` when a cache file already exists (skip).
+    """
+    from corticalfields.utils import gc_gpu
+
+    sid = subject.subject_id
+
+    if cache_dir is not None:
+        cache_file = cache_dir / f"{sid}.npz"
+        if cache_file.exists():
+            logger.debug("Cache hit for %s, skipping.", sid)
+            return sid, None
+
+    lb = compute_eigenpairs(
+        subject.vertices,
+        subject.faces,
+        n_eigenpairs=n_eigenpairs,
+        use_robust=use_robust,
+        sigma=sigma,
+        backend=backend,
+    )
+
+    if cache_dir is not None:
+        cache_file = cache_dir / f"{sid}.npz"
+        save_dict: Dict[str, Any] = {
+            "eigenvalues": lb.eigenvalues,
+            "eigenvectors": lb.eigenvectors,
+        }
+        if save_matrices and lb.has_matrices:
+            save_dict["stiffness_data"] = lb.stiffness.data
+            save_dict["stiffness_indices"] = lb.stiffness.indices
+            save_dict["stiffness_indptr"] = lb.stiffness.indptr
+            save_dict["stiffness_shape"] = np.array(lb.stiffness.shape)
+            save_dict["mass_data"] = lb.mass.data
+            save_dict["mass_indices"] = lb.mass.indices
+            save_dict["mass_indptr"] = lb.mass.indptr
+            save_dict["mass_shape"] = np.array(lb.mass.shape)
+        np.savez_compressed(str(cache_file), **save_dict)
+
+    gc_gpu()
+    return sid, lb
+
+
+@dataclass
+class BatchResult:
+    """
+    Container for batch eigenpair processing results.
+
+    Attributes
+    ----------
+    results : dict[str, LaplaceBeltrami | None]
+        Mapping ``subject_id → LaplaceBeltrami``.  Value is ``None``
+        for cache-hit subjects when ``return_results=False``.
+    cache_dir : Path or None
+        Directory where ``.npz`` caches were written.
+    n_computed : int
+        Subjects actually computed (excluding cache hits).
+    n_cached : int
+        Subjects skipped due to existing cache.
+    elapsed_seconds : float
+        Wall-clock time for the entire batch.
+    memory_estimate : MemoryEstimate
+        Per-subject memory estimate that was used for resource planning.
+    """
+
+    results: Dict[str, Any]
+    cache_dir: Optional[Path]
+    n_computed: int
+    n_cached: int
+    elapsed_seconds: float
+    memory_estimate: MemoryEstimate
+
+
+def batch_compute_eigenpairs(
+    subjects: Sequence[SubjectMesh],
+    n_eigenpairs: int = 300,
+    use_robust: bool = True,
+    sigma: float = -0.01,
+    backend: str = "auto",
+    n_jobs: int = 4,
+    batch_size: int = 1,
+    cache_dir: Optional[Union[str, Path]] = None,
+    save_matrices: bool = False,
+    return_results: bool = True,
+    ram_reserve_gb: float = 2.0,
+    vram_reserve_gb: float = 1.0,
+    progress: bool = True,
+) -> BatchResult:
+    """
+    Compute LBO eigenpairs for multiple subjects with smart parallelism.
+
+    Strategy per backend
+    --------------------
+    - **scipy** (CPU): :mod:`joblib` with ``n_jobs`` parallel workers.
+      ``n_jobs`` is clamped if predicted per-subject RAM exceeds
+      available system memory.
+    - **torch** (GPU): Sequential on GPU in batches of ``batch_size``.
+      :func:`~corticalfields.utils.gc_gpu` is called between batches.
+      ``batch_size`` is clamped by free VRAM.
+    - **cupy** (GPU): Same strategy as torch; CuPy memory pool is freed
+      between batches.
+
+    The function calls :func:`compute_safe_parallelism` to estimate
+    per-subject memory and adjust ``n_jobs`` / ``batch_size`` to fit
+    within system resources before starting.
+
+    Parameters
+    ----------
+    subjects : sequence of SubjectMesh
+        Each element carries ``subject_id``, ``vertices``, ``faces``.
+    n_eigenpairs : int
+        Number of LBO eigenpairs per subject.
+    use_robust : bool
+        Use ``robust-laplacian`` (Sharp & Crane 2020) when available.
+    sigma : float
+        Shift-invert parameter for the eigensolver.
+    backend : str
+        ``"auto"``, ``"scipy"``, ``"torch"``, or ``"cupy"``.
+    n_jobs : int
+        Maximum joblib workers (CPU only).  Automatically clamped by
+        available RAM.  Ignored for GPU backends.
+    batch_size : int
+        Maximum subjects per GPU batch before ``gc_gpu()``.  Clamped
+        by available VRAM.  Ignored for CPU.
+    cache_dir : str or Path or None
+        If set, each subject is saved as ``{subject_id}.npz`` and
+        skipped on re-run.  Created automatically if missing.
+    save_matrices : bool
+        Also cache the sparse stiffness / mass matrices (large).
+    return_results : bool
+        If ``False``, result dict values are ``None`` (saves RAM when
+        only caching to disk).
+    ram_reserve_gb : float
+        RAM headroom to leave for the OS / other processes.
+    vram_reserve_gb : float
+        VRAM headroom for other GPU consumers.
+    progress : bool
+        Show Rich progress bars (two-level: total + batch).
+
+    Returns
+    -------
+    BatchResult
+
+    Examples
+    --------
+    >>> meshes = [SubjectMesh("sub-01", v1, f1), SubjectMesh("sub-02", v2, f2)]
+    >>> res = batch_compute_eigenpairs(meshes, n_eigenpairs=200, n_jobs=4,
+    ...                                cache_dir="./cache")
+    >>> res.results["sub-01"].eigenvalues.shape
+    (200,)
+    """
+    from corticalfields.backends import resolve_backend
+
+    if len(subjects) == 0:
+        raise ValueError("subjects list is empty.")
+
+    resolved = resolve_backend(backend)
+    backend_str = resolved.value
+
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Memory-aware parallelism ──
+    max_verts = max(s.n_vertices for s in subjects)
+    safe_n_jobs, safe_batch_size, mem_est = compute_safe_parallelism(
+        n_vertices=max_verts,
+        n_eigenpairs=n_eigenpairs,
+        backend=backend_str,
+        requested_n_jobs=n_jobs,
+        requested_batch_size=batch_size,
+        ram_reserve_gb=ram_reserve_gb,
+        vram_reserve_gb=vram_reserve_gb,
+    )
+
+    n_total = len(subjects)
+
+    logger.info(
+        "Batch eigenpairs: %d subjects, backend=%s, n_jobs=%d, "
+        "batch_size=%d, per-subject RAM=%.2f GB, VRAM=%.2f GB",
+        n_total, backend_str, safe_n_jobs, safe_batch_size,
+        mem_est.ram_gb, mem_est.vram_gb,
+    )
+
+    t0 = time.perf_counter()
+
+    if backend_str == "scipy":
+        results, n_computed, n_cached = _batch_cpu(
+            subjects, n_eigenpairs, use_robust, sigma, backend_str,
+            safe_n_jobs, cache_dir, save_matrices, return_results,
+            progress,
+        )
+    else:
+        results, n_computed, n_cached = _batch_gpu(
+            subjects, n_eigenpairs, use_robust, sigma, backend_str,
+            safe_batch_size, cache_dir, save_matrices, return_results,
+            progress,
+        )
+
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "Batch complete: %d computed, %d cached, %.1fs elapsed.",
+        n_computed, n_cached, elapsed,
+    )
+
+    return BatchResult(
+        results=results,
+        cache_dir=cache_dir,
+        n_computed=n_computed,
+        n_cached=n_cached,
+        elapsed_seconds=elapsed,
+        memory_estimate=mem_est,
+    )
+
+
+# ── Rich progress column spec (shared) ──────────────────────────────────
+
+
+def _rich_columns():
+    """Return the Rich progress column list for batch bars."""
+    from rich.progress import (
+        BarColumn, MofNCompleteColumn, SpinnerColumn, TextColumn,
+        TimeElapsedColumn, TimeRemainingColumn,
+    )
+    return [
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+    ]
+
+
+# ── CPU batch (joblib) ──────────────────────────────────────────────────
+
+
+def _batch_cpu(
+    subjects: Sequence[SubjectMesh],
+    n_eigenpairs: int,
+    use_robust: bool,
+    sigma: float,
+    backend: str,
+    n_jobs: int,
+    cache_dir: Optional[Path],
+    save_matrices: bool,
+    return_results: bool,
+    progress: bool,
+) -> Tuple[Dict[str, Any], int, int]:
+    """CPU-parallel batch via joblib with Rich progress."""
+    from joblib import Parallel, delayed
+
+    n_total = len(subjects)
+    to_compute: List[SubjectMesh] = []
+    cached_ids: List[str] = []
+
+    for s in subjects:
+        if cache_dir is not None and (cache_dir / f"{s.subject_id}.npz").exists():
+            cached_ids.append(s.subject_id)
+        else:
+            to_compute.append(s)
+
+    results: Dict[str, Any] = {sid: None for sid in cached_ids}
+    n_cached = len(cached_ids)
+    n_to_do = len(to_compute)
+
+    if n_to_do == 0:
+        if progress:
+            _print_all_cached(n_total)
+        return results, 0, n_cached
+
+    if not progress:
+        pairs = Parallel(n_jobs=n_jobs, prefer="processes")(
+            delayed(_process_single_subject)(
+                s, n_eigenpairs, use_robust, sigma, backend,
+                cache_dir, save_matrices,
+            )
+            for s in to_compute
+        )
+        for sid, lb in pairs:
+            results[sid] = lb if return_results else None
+        return results, n_to_do, n_cached
+
+    # Rich progress with joblib generator (≥ 1.3) or chunk fallback
+    from rich.progress import Progress
+
+    with Progress(*_rich_columns(), transient=False) as prog:
+        total_task = prog.add_task(
+            "Subjects", total=n_total, completed=n_cached,
+        )
+        try:
+            gen = Parallel(
+                n_jobs=n_jobs, prefer="processes",
+                return_as="generator",
+            )(
+                delayed(_process_single_subject)(
+                    s, n_eigenpairs, use_robust, sigma, backend,
+                    cache_dir, save_matrices,
+                )
+                for s in to_compute
+            )
+            for sid, lb in gen:
+                results[sid] = lb if return_results else None
+                prog.advance(total_task, 1)
+        except TypeError:
+            chunk_sz = max(1, n_jobs)
+            for i in range(0, n_to_do, chunk_sz):
+                chunk = to_compute[i : i + chunk_sz]
+                pairs = Parallel(n_jobs=n_jobs, prefer="processes")(
+                    delayed(_process_single_subject)(
+                        s, n_eigenpairs, use_robust, sigma, backend,
+                        cache_dir, save_matrices,
+                    )
+                    for s in chunk
+                )
+                for sid, lb in pairs:
+                    results[sid] = lb if return_results else None
+                    prog.advance(total_task, 1)
+
+    return results, n_to_do, n_cached
+
+
+# ── GPU batch (torch / cupy — sequential, gc between batches) ───────────
+
+
+def _batch_gpu(
+    subjects: Sequence[SubjectMesh],
+    n_eigenpairs: int,
+    use_robust: bool,
+    sigma: float,
+    backend: str,
+    batch_size: int,
+    cache_dir: Optional[Path],
+    save_matrices: bool,
+    return_results: bool,
+    progress: bool,
+) -> Tuple[Dict[str, Any], int, int]:
+    """GPU sequential batch with two-level Rich progress."""
+    from corticalfields.utils import gc_gpu
+
+    n_total = len(subjects)
+    to_compute: List[SubjectMesh] = []
+    cached_ids: List[str] = []
+
+    for s in subjects:
+        if cache_dir is not None and (cache_dir / f"{s.subject_id}.npz").exists():
+            cached_ids.append(s.subject_id)
+        else:
+            to_compute.append(s)
+
+    results: Dict[str, Any] = {sid: None for sid in cached_ids}
+    n_cached = len(cached_ids)
+    n_to_do = len(to_compute)
+
+    if n_to_do == 0:
+        if progress:
+            _print_all_cached(n_total)
+        return results, 0, n_cached
+
+    batches: List[List[SubjectMesh]] = [
+        to_compute[i : i + batch_size]
+        for i in range(0, n_to_do, batch_size)
+    ]
+    n_batches = len(batches)
+    show_batch_bar = n_batches > 1
+
+    if not progress:
+        for batch in batches:
+            for s in batch:
+                sid, lb = _process_single_subject(
+                    s, n_eigenpairs, use_robust, sigma, backend,
+                    cache_dir, save_matrices,
+                )
+                results[sid] = lb if return_results else None
+            gc_gpu()
+        return results, n_to_do, n_cached
+
+    from rich.progress import Progress
+
+    with Progress(*_rich_columns(), transient=False) as prog:
+        total_task = prog.add_task(
+            "Subjects", total=n_total, completed=n_cached,
+        )
+        batch_task = None
+        if show_batch_bar:
+            batch_task = prog.add_task("  Batch", total=0, visible=True)
+
+        for b_idx, batch in enumerate(batches):
+            if show_batch_bar and batch_task is not None:
+                prog.reset(batch_task, total=len(batch), completed=0)
+                prog.update(
+                    batch_task,
+                    description=f"  Batch {b_idx + 1}/{n_batches}",
+                )
+
+            for s in batch:
+                sid, lb = _process_single_subject(
+                    s, n_eigenpairs, use_robust, sigma, backend,
+                    cache_dir, save_matrices,
+                )
+                results[sid] = lb if return_results else None
+                prog.advance(total_task, 1)
+                if show_batch_bar and batch_task is not None:
+                    prog.advance(batch_task, 1)
+
+            gc_gpu()
+
+        if batch_task is not None:
+            prog.update(batch_task, visible=False)
+
+    return results, n_to_do, n_cached
+
+
+def _print_all_cached(n: int) -> None:
+    """Quick Rich print when everything is cached."""
+    try:
+        from rich.console import Console
+        Console().print(
+            f"[green]✓[/green] All {n} subjects found in cache "
+            "— nothing to compute."
+        )
+    except ImportError:
+        print(f"All {n} subjects found in cache — nothing to compute.")
+
+
+def load_cached_eigenpairs(
+    cache_dir: Union[str, Path],
+    subject_id: str,
+) -> LaplaceBeltrami:
+    """
+    Load a cached eigenpair result from disk.
+
+    Parameters
+    ----------
+    cache_dir : str or Path
+        Directory passed to :func:`batch_compute_eigenpairs`.
+    subject_id : str
+        Subject identifier.
+
+    Returns
+    -------
+    LaplaceBeltrami
+        Reconstructed object.  ``stiffness`` / ``mass`` are ``None``
+        unless ``save_matrices=True`` was used during batch processing.
+    """
+    cache_file = Path(cache_dir) / f"{subject_id}.npz"
+    if not cache_file.exists():
+        raise FileNotFoundError(
+            f"No cache for subject {subject_id!r} at {cache_file}"
+        )
+
+    data = np.load(str(cache_file), allow_pickle=False)
+
+    stiffness = None
+    mass = None
+    if "stiffness_data" in data:
+        stiffness = sp.csc_matrix(
+            (data["stiffness_data"], data["stiffness_indices"],
+             data["stiffness_indptr"]),
+            shape=tuple(data["stiffness_shape"]),
+        )
+    if "mass_data" in data:
+        mass = sp.csc_matrix(
+            (data["mass_data"], data["mass_indices"],
+             data["mass_indptr"]),
+            shape=tuple(data["mass_shape"]),
+        )
+
+    return LaplaceBeltrami(
+        stiffness=stiffness,
+        mass=mass,
+        eigenvalues=data["eigenvalues"],
+        eigenvectors=data["eigenvectors"],
     )
 
 

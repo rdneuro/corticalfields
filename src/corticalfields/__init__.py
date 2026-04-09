@@ -58,6 +58,14 @@ def __getattr__(name: str):
         "T1wExtractionResult": ("corticalfields.pointcloud", "T1wExtractionResult"),
         "compute_mesh_laplacian": ("corticalfields.pointcloud", "compute_mesh_laplacian"),
         "compute_mesh_eigenpairs": ("corticalfields.pointcloud", "compute_mesh_eigenpairs"),
+        # batch processing (in spectral.py)
+        "batch_compute_eigenpairs": ("corticalfields.spectral", "batch_compute_eigenpairs"),
+        "SubjectMesh": ("corticalfields.spectral", "SubjectMesh"),
+        "BatchResult": ("corticalfields.spectral", "BatchResult"),
+        "load_cached_eigenpairs": ("corticalfields.spectral", "load_cached_eigenpairs"),
+        "estimate_memory_per_subject": ("corticalfields.spectral", "estimate_memory_per_subject"),
+        "compute_safe_parallelism": ("corticalfields.spectral", "compute_safe_parallelism"),
+        "MemoryEstimate": ("corticalfields.spectral", "MemoryEstimate"),
         # ── analysis.normative (was: normative.py) ──────────────────────
         "CorticalNormativeModel": ("corticalfields.analysis.normative", "CorticalNormativeModel"),
         "NormativeResult": ("corticalfields.analysis.normative", "NormativeResult"),
