@@ -29,7 +29,7 @@ surface, subcortical, hippocampus, spectral, kernels, surprise, features,
 graphs, distance_stats, asymmetry, transport, functional_maps, datasets, utils
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 __author__ = "rdneuro"
 
 
@@ -92,7 +92,7 @@ def __getattr__(name: str):
         "to_latex_table": ("corticalfields.analysis.bayesian", "to_latex_table"),
         "elicit_prior": ("corticalfields.analysis.bayesian", "elicit_prior"),
         "enigma_informed_prior": ("corticalfields.analysis.bayesian", "enigma_informed_prior"),
-        # ── analysis.stats (NEW v0.3.0) ─────────────────────────────────
+        # ── analysis.stats (NEW v0.2.2) ─────────────────────────────────
         "StatResult": ("corticalfields.analysis.stats", "StatResult"),
         "MultipleComparisonResult": ("corticalfields.analysis.stats", "MultipleComparisonResult"),
         "fdr_correction": ("corticalfields.analysis.stats", "fdr_correction"),
@@ -120,6 +120,44 @@ def __getattr__(name: str):
         "conformal_prediction_intervals": ("corticalfields.analysis.stats", "conformal_prediction_intervals"),
         "bootstrap_gpu": ("corticalfields.analysis.stats", "bootstrap_gpu"),
         "permutation_matrix_gpu": ("corticalfields.analysis.stats", "permutation_matrix_gpu"),
+        # ── graphs.py (REWRITTEN v0.2.2) ──────────────────────────────────
+        "GraphResult": ("corticalfields.graphs", "GraphResult"),
+        "GraphMetrics": ("corticalfields.graphs", "GraphMetrics"),
+        "morphometric_similarity_network": ("corticalfields.graphs", "morphometric_similarity_network"),
+        "spectral_similarity_network": ("corticalfields.graphs", "spectral_similarity_network"),
+        "mind_divergence_network": ("corticalfields.graphs", "mind_divergence_network"),
+        "wasserstein_spectral_network": ("corticalfields.graphs", "wasserstein_spectral_network"),
+        "multi_descriptor_network": ("corticalfields.graphs", "multi_descriptor_network"),
+        "proportional_threshold": ("corticalfields.graphs", "proportional_threshold"),
+        "omst_threshold": ("corticalfields.graphs", "omst_threshold"),
+        "backbone_disparity_filter": ("corticalfields.graphs", "backbone_disparity_filter"),
+        "apply_threshold": ("corticalfields.graphs", "apply_threshold"),
+        "comprehensive_graph_metrics": ("corticalfields.graphs", "comprehensive_graph_metrics"),
+        "community_detection": ("corticalfields.graphs", "community_detection"),
+        "persistent_homology": ("corticalfields.graphs", "persistent_homology"),
+        "nbs_morphometric": ("corticalfields.graphs", "nbs_morphometric"),
+        "group_metric_comparison": ("corticalfields.graphs", "group_metric_comparison"),
+        "to_pyg_data": ("corticalfields.graphs", "to_pyg_data"),
+        "build_population_graph": ("corticalfields.graphs", "build_population_graph"),
+        "BrainGraphGCN": ("corticalfields.graphs", "BrainGraphGCN"),
+        "spectral_morphometric_pipeline": ("corticalfields.graphs", "spectral_morphometric_pipeline"),
+        "YEO7_COLORS": ("corticalfields.graphs", "YEO7_COLORS"),
+        # ── viz.graph_viz (NEW v0.2.2) ───────────────────────────────────
+        "plot_glass_brain_connectome": ("corticalfields.viz.graph_viz", "plot_glass_brain_connectome"),
+        "plot_adjacency_matrix": ("corticalfields.viz.graph_viz", "plot_adjacency_matrix"),
+        "plot_edge_weight_distribution": ("corticalfields.viz.graph_viz", "plot_edge_weight_distribution"),
+        "plot_laplacian_spectrum": ("corticalfields.viz.graph_viz", "plot_laplacian_spectrum"),
+        "plot_graph_layout": ("corticalfields.viz.graph_viz", "plot_graph_layout"),
+        "plot_rich_club_curve": ("corticalfields.viz.graph_viz", "plot_rich_club_curve"),
+        "plot_nbs_result": ("corticalfields.viz.graph_viz", "plot_nbs_result"),
+        "plot_persistence_diagram": ("corticalfields.viz.graph_viz", "plot_persistence_diagram"),
+        "plot_metric_comparison": ("corticalfields.viz.graph_viz", "plot_metric_comparison"),
+        "plot_small_world": ("corticalfields.viz.graph_viz", "plot_small_world"),
+        "plot_surface_metric": ("corticalfields.viz.graph_viz", "plot_surface_metric"),
+        "plot_graph_composite": ("corticalfields.viz.graph_viz", "plot_graph_composite"),
+        "save_graph_figure": ("corticalfields.viz.graph_viz", "save_graph_figure"),
+        # ── utils.py (progress bars) ─────────────────────────────────────
+        "cf_progress": ("corticalfields.utils", "cf_progress"),
         # ── subcortical.py ──────────────────────────────────────────────
         "SubcorticalSurface": ("corticalfields.subcortical", "SubcorticalSurface"),
         "load_subcortical_surface": ("corticalfields.subcortical", "load_subcortical_surface"),
@@ -264,4 +302,24 @@ __all__ = [
     "estimate_n_eigenpairs", "gc_gpu", "vram_report", "vram_guard",
     "fetch_toy_dataset", "clear_toy_dataset",
     "load_example_surface", "ToyDataset",
+    # ── graphs (v0.2.2) ──────────────────────────────────────────────
+    "GraphResult", "GraphMetrics",
+    "morphometric_similarity_network", "spectral_similarity_network",
+    "mind_divergence_network", "wasserstein_spectral_network",
+    "multi_descriptor_network",
+    "proportional_threshold", "omst_threshold", "backbone_disparity_filter",
+    "apply_threshold",
+    "comprehensive_graph_metrics", "community_detection",
+    "persistent_homology", "nbs_morphometric", "group_metric_comparison",
+    "to_pyg_data", "build_population_graph", "BrainGraphGCN",
+    "spectral_morphometric_pipeline", "YEO7_COLORS",
+    # ── viz.graph_viz (v0.2.2) ────────────────────────────────────────
+    "plot_glass_brain_connectome", "plot_adjacency_matrix",
+    "plot_edge_weight_distribution", "plot_laplacian_spectrum",
+    "plot_graph_layout", "plot_rich_club_curve", "plot_nbs_result",
+    "plot_persistence_diagram", "plot_metric_comparison",
+    "plot_small_world", "plot_surface_metric",
+    "plot_graph_composite", "save_graph_figure",
+    # ── utils (progress bars) ─────────────────────────────────────────
+    "cf_progress",
 ]

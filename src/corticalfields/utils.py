@@ -419,3 +419,263 @@ def setup_logging(level: str = "INFO") -> None:
         format="[%(asctime)s] %(name)s — %(levelname)s — %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Progress Bars
+# ═══════════════════════════════════════════════════════════════════════════
+
+# CorticalFields ships multiple progress-bar styles so that long-running
+# graph construction, permutation testing, and batch pipelines always give
+# the user clear feedback.  The public entry point is ``cf_progress()``,
+# which returns a Rich or tqdm progress context depending on availability.
+
+
+def _has_rich() -> bool:
+    """Check whether the Rich library is installed."""
+    try:
+        import rich  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _has_tqdm() -> bool:
+    """Check whether tqdm is installed."""
+    try:
+        import tqdm  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def cf_progress(
+    iterable=None,
+    total: Optional[int] = None,
+    description: str = "",
+    style: str = "auto",
+    transient: bool = False,
+    disable: bool = False,
+):
+    """
+    Create a CorticalFields progress bar.
+
+    Returns an iterator wrapper that displays a progress bar during
+    long-running loops (graph construction, permutation testing,
+    batch subject processing, etc.).
+
+    Parameters
+    ----------
+    iterable : iterable or None
+        The sequence to iterate over.  If *None*, use ``total`` and
+        call ``.update()`` manually on the returned object.
+    total : int or None
+        Total number of steps (inferred from *iterable* when possible).
+    description : str
+        Label displayed beside the progress bar.
+    style : ``'auto'``, ``'rich'``, ``'tqdm'``, ``'simple'``
+        ``'auto'``   — Rich if available, else tqdm, else simple print.
+        ``'rich'``   — Force Rich (raises ImportError if missing).
+        ``'tqdm'``   — Force tqdm (raises ImportError if missing).
+        ``'simple'`` — Lightweight log-based progress (no dependency).
+    transient : bool
+        If True (Rich only), the bar disappears when complete.
+    disable : bool
+        Disable the bar entirely (returns iterable unchanged).
+
+    Returns
+    -------
+    progress_wrapper
+        An iterable that wraps *iterable* with a visual progress bar.
+        If *iterable* is None, returns a context-manager with an
+        ``.update(n)`` method for manual advancement.
+
+    Examples
+    --------
+    >>> for subj in cf_progress(subjects, description="Computing graphs"):
+    ...     process(subj)
+
+    >>> pbar = cf_progress(total=1000, description="Permutations")
+    >>> with pbar as p:
+    ...     for i in range(1000):
+    ...         run_permutation(i)
+    ...         p.update(1)
+    """
+    if disable:
+        return iterable if iterable is not None else _NullProgress(total)
+
+    # Resolve 'auto' style
+    if style == "auto":
+        if _has_rich():
+            style = "rich"
+        elif _has_tqdm():
+            style = "tqdm"
+        else:
+            style = "simple"
+
+    if style == "rich":
+        return _rich_progress(iterable, total, description, transient)
+    elif style == "tqdm":
+        return _tqdm_progress(iterable, total, description)
+    else:
+        return _simple_progress(iterable, total, description)
+
+
+class _NullProgress:
+    """No-op progress bar for when display is disabled."""
+
+    def __init__(self, total=None):
+        self._total = total
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def __iter__(self):
+        return iter(range(self._total or 0))
+
+    def update(self, n=1):
+        pass
+
+
+def _rich_progress(iterable, total, description, transient):
+    """Rich-based progress bar with CorticalFields styling."""
+    from rich.progress import (
+        Progress, BarColumn, TextColumn, TimeRemainingColumn,
+        SpinnerColumn, MofNCompleteColumn, TimeElapsedColumn,
+    )
+
+    columns = [
+        SpinnerColumn("dots", style="cyan"),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=40, style="bar.back", complete_style="cyan",
+                  finished_style="green"),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("→"),
+        TimeRemainingColumn(),
+    ]
+    progress = Progress(*columns, transient=transient)
+
+    if iterable is not None:
+        _total = total if total is not None else (
+            len(iterable) if hasattr(iterable, "__len__") else None
+        )
+        return _RichIterWrapper(progress, iterable, _total, description)
+    else:
+        return _RichManualWrapper(progress, total, description)
+
+
+class _RichIterWrapper:
+    """Wrap an iterable with a Rich progress bar."""
+
+    def __init__(self, progress, iterable, total, description):
+        self._progress = progress
+        self._iterable = iterable
+        self._total = total
+        self._desc = description
+
+    def __iter__(self):
+        with self._progress:
+            task = self._progress.add_task(self._desc, total=self._total)
+            for item in self._iterable:
+                yield item
+                self._progress.advance(task)
+
+
+class _RichManualWrapper:
+    """Manual-advance Rich progress bar (context-manager)."""
+
+    def __init__(self, progress, total, description):
+        self._progress = progress
+        self._total = total
+        self._desc = description
+        self._task = None
+
+    def __enter__(self):
+        self._progress.start()
+        self._task = self._progress.add_task(self._desc, total=self._total)
+        return self
+
+    def __exit__(self, *args):
+        self._progress.stop()
+
+    def update(self, n=1):
+        if self._task is not None:
+            self._progress.advance(self._task, advance=n)
+
+
+def _tqdm_progress(iterable, total, description):
+    """tqdm-based fallback progress bar."""
+    from tqdm.auto import tqdm
+    return tqdm(
+        iterable, total=total, desc=description,
+        bar_format="{l_bar}{bar:30}{r_bar}",
+        ncols=100,
+    )
+
+
+class _SimpleProgressIter:
+    """Minimal log-based progress for environments with no Rich/tqdm."""
+
+    def __init__(self, iterable, total, description):
+        self._iterable = iterable
+        self._total = total or (
+            len(iterable) if hasattr(iterable, "__len__") else None
+        )
+        self._desc = description
+
+    def __iter__(self):
+        import sys
+        t0 = time.perf_counter()
+        for i, item in enumerate(self._iterable):
+            yield item
+            if self._total and (i + 1) % max(1, self._total // 20) == 0:
+                pct = 100.0 * (i + 1) / self._total
+                elapsed = time.perf_counter() - t0
+                sys.stderr.write(
+                    f"\r  {self._desc}: {pct:5.1f}% ({i+1}/{self._total}) "
+                    f"[{elapsed:.1f}s]"
+                )
+                sys.stderr.flush()
+        sys.stderr.write("\n")
+
+
+class _SimpleManualProgress:
+    """Manual-advance log-based progress."""
+
+    def __init__(self, total, description):
+        self._total = total
+        self._desc = description
+        self._count = 0
+        self._t0 = None
+
+    def __enter__(self):
+        self._t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, *args):
+        import sys
+        sys.stderr.write("\n")
+
+    def update(self, n=1):
+        import sys
+        self._count += n
+        if self._total and self._count % max(1, self._total // 20) == 0:
+            pct = 100.0 * self._count / self._total
+            elapsed = time.perf_counter() - (self._t0 or time.perf_counter())
+            sys.stderr.write(
+                f"\r  {self._desc}: {pct:5.1f}% ({self._count}/{self._total})"
+                f" [{elapsed:.1f}s]"
+            )
+            sys.stderr.flush()
+
+
+def _simple_progress(iterable, total, description):
+    """Return the appropriate simple wrapper."""
+    if iterable is not None:
+        return _SimpleProgressIter(iterable, total, description)
+    return _SimpleManualProgress(total, description)

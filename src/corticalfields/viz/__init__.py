@@ -81,6 +81,25 @@ def __getattr__(name: str):
         "plot_zscore_surface": ".subcortical",
         "plot_shapedna_comparison": ".subcortical",
         "plot_point_cloud_3d": ".subcortical",
+        # viz.graph_viz
+        "plot_glass_brain_connectome": ".graph_viz",
+        "plot_connectivity_circle": ".graph_viz",
+        "plot_adjacency_matrix": ".graph_viz",
+        "plot_edge_weight_distribution": ".graph_viz",
+        "plot_laplacian_spectrum": ".graph_viz",
+        "plot_graph_layout": ".graph_viz",
+        "plot_rich_club_curve": ".graph_viz",
+        "plot_nbs_result": ".graph_viz",
+        "plot_persistence_diagram": ".graph_viz",
+        "plot_metric_comparison": ".graph_viz",
+        "plot_small_world": ".graph_viz",
+        "plot_surface_metric": ".graph_viz",
+        "plot_graph_composite": ".graph_viz",
+        "save_graph_figure": ".graph_viz",
+        "PUBLICATION_RC": ".graph_viz",
+        "YEO7_COLORS": ".graph_viz",
+        "TOL_BRIGHT": ".graph_viz",
+        "OKABE_ITO": ".graph_viz",
     }
 
     if name in _SUBMODULE_MAP:
@@ -88,7 +107,7 @@ def __getattr__(name: str):
         return getattr(mod, name)
 
     # Allow `from corticalfields.viz import brainplots` etc.
-    _MODULES = {"brainplots", "bayes", "viz", "subcortical"}
+    _MODULES = {"brainplots", "bayes", "viz", "subcortical", "graph_viz"}
     if name in _MODULES:
         return importlib.import_module(f".{name}", package=__name__)
 
