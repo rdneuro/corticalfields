@@ -180,28 +180,21 @@ def skull_strip_deepbet(
         mask_path = output_dir / "brain_mask.nii.gz"
         brain_path = output_dir / "brain.nii.gz"
 
-        # deepbet API changed across versions:
-        #   old: run_bet(input=str, output=str, gpu=bool)
-        #   new: run_bet(input_paths=[str], brain_paths=[str], mask_paths=[str], gpu=bool)
-        import inspect
-        sig = inspect.signature(run_bet)
-        params = set(sig.parameters.keys())
-
+        # deepbet API (from README):
+        #   run_bet(input_paths, brain_paths, mask_paths, tiv_paths,
+        #           threshold=.5, n_dilate=0, no_gpu=False)
+        # All positional, all lists. GPU flag is inverted: no_gpu=False means USE gpu.
         use_cuda = use_gpu and torch.cuda.is_available()
 
-        if "input_paths" in params:
-            run_bet(
-                input_paths=[str(t1w_path)],
-                brain_paths=[str(brain_path)],
-                mask_paths=[str(mask_path)],
-                gpu=use_cuda,
-            )
-        else:
-            run_bet(
-                input=str(t1w_path),
-                output=str(mask_path),
-                gpu=use_cuda,
-            )
+        run_bet(
+            [str(t1w_path)],           # input_paths
+            [str(brain_path)],         # brain_paths
+            [str(mask_path)],          # mask_paths
+            [],                        # tiv_paths (not needed)
+            threshold=0.5,
+            n_dilate=0,
+            no_gpu=(not use_cuda),
+        )
 
         mask_img = nib.load(str(mask_path))
         brain_mask = np.asarray(mask_img.dataobj).astype(bool)
