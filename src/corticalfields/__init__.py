@@ -29,7 +29,7 @@ surface, subcortical, hippocampus, spectral, kernels, surprise, features,
 graphs, distance_stats, asymmetry, transport, functional_maps, datasets, utils
 """
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 __author__ = "rdneuro"
 
 
