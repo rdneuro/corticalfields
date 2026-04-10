@@ -424,19 +424,19 @@ def _eigsh_torch(
 
     Uses **Chebyshev-Filtered Subspace Iteration** (ChFSI) with:
 
+    - **COO sparse format**: bypasses the buggy cuSPARSE CSR
+      ``load_balancing_kernel`` (CUDA 13.0 bugs CUSPARSE-2380/2764/2612,
+      PyTorch #188669) that causes out-of-bounds GPU memory reads after
+      ~90-100 repeated SpMM calls, leading to unrecoverable PCIe hangs.
     - **In-place Chebyshev recurrence**: ``Tensor.add_(X, alpha=s)``
       and ``Tensor.mul_()`` eliminate ALL intermediate tensor allocations
-      in the filter loop.  The only unavoidable allocation per step is
-      the SpMV result from ``torch.sparse.mm`` (which has no ``out=``).
-    - **Eager deallocation**: every temporary is ``del``'d immediately
-      and ``torch.cuda.empty_cache()`` runs after each outer iteration.
-    - **VRAM watermark check**: logs allocated VRAM at start/end and
-      warns if a leak is detected.
-    - **``torch.no_grad()``**: prevents the ~500 SpMV operations from
-      building a computation graph that would leak 10+ GB of RAM.
-    - **Periodic ``synchronize()``**: every 4 SpMV launches inside the
-      Chebyshev filter, plus after each Ritz step, to prevent the
-      NVIDIA driver watchdog from triggering a PCIe bus hang.
+      in the filter loop.
+    - **Eager deallocation + ``empty_cache()`` every outer iteration**.
+    - **VRAM watermark monitoring** with leak detection.
+    - **``torch.no_grad()``** to prevent autograd graph leak.
+    - **Periodic ``synchronize()``** to prevent driver watchdog timeout.
+    - **``PYTORCH_CUDA_ALLOC_CONF``** with expandable segments for
+      batch stability across hundreds of subjects.
 
     Per-subject VRAM budget (N=150k, k=100, m=120):
         Sparse A:     ~14 MB (CSR, f32, ~7 nnz/row)
@@ -498,20 +498,47 @@ def _eigsh_torch(
     M_inv_sqrt_np = 1.0 / np.sqrt(M_diag)
 
     D_sp = sp.diags(M_inv_sqrt_np.astype(np.float32), format="csc")
-    A_cpu = (D_sp @ L.tocsc().astype(np.float32) @ D_sp).tocsr()
+    A_cpu = (D_sp @ L.tocsc().astype(np.float32) @ D_sp).tocoo()
     del D_sp
 
-    # ── scipy CSR → torch CSR ───────────────────────────────────────
-    def _to_csr(m_csr):
-        return torch.sparse_csr_tensor(
-            torch.from_numpy(m_csr.indptr.astype(np.int64)).to(device),
-            torch.from_numpy(m_csr.indices.astype(np.int64)).to(device),
-            torch.from_numpy(m_csr.data.astype(np.float32)).to(device),
-            size=m_csr.shape, dtype=spmv_torch_dtype,
-        )
+    # ── Configure PyTorch CUDA allocator for batch stability ────────
+    # expandable_segments avoids fragmentation from hundreds of
+    # alloc/free cycles across subjects; max_split_size_mb prevents
+    # the allocator from splitting large blocks into small slivers;
+    # garbage_collection_threshold triggers proactive reclamation.
+    import os
+    _alloc_conf = (
+        "expandable_segments:True,"
+        "max_split_size_mb:128,"
+        "garbage_collection_threshold:0.6"
+    )
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = _alloc_conf
+        # Only takes effect if called before first CUDA allocation,
+        # so we also set it programmatically where possible:
+        try:
+            torch.cuda.memory._set_allocator_settings(_alloc_conf)
+        except Exception:
+            pass  # older PyTorch — env var is the fallback
+
+    # ── scipy COO → torch sparse COO on device ─────────────────────
+    # COO format bypasses the buggy cuSPARSE CSR load-balancing kernel
+    # (cusparse::load_balancing_kernel<CsrMMOpAlg1>) that causes
+    # out-of-bounds reads after ~90-100 repeated SpMM calls
+    # (CUDA 13.0 bugs CUSPARSE-2380, CUSPARSE-2764, CUSPARSE-2612;
+    # confirmed in PyTorch issue #188669; fixed in CUDA 13.2).
+    # COO routes through an older, more stable cuSPARSE code path.
+    def _to_coo(m_coo):
+        indices = np.vstack([m_coo.row.astype(np.int64),
+                             m_coo.col.astype(np.int64)])
+        return torch.sparse_coo_tensor(
+            torch.from_numpy(indices).to(device),
+            torch.from_numpy(m_coo.data.astype(np.float32)).to(device),
+            size=m_coo.shape, dtype=spmv_torch_dtype,
+        ).coalesce()
 
     try:
-        A_t = _to_csr(A_cpu)
+        A_t = _to_coo(A_cpu)
         del A_cpu
 
         with torch.no_grad():
