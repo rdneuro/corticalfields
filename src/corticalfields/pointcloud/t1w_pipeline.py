@@ -178,25 +178,25 @@ def skull_strip_deepbet(
             output_dir.mkdir(parents=True, exist_ok=True)
 
         mask_path = output_dir / "brain_mask.nii.gz"
+        brain_path = output_dir / "brain.nii.gz"
 
         # deepbet API changed across versions:
         #   old: run_bet(input=str, output=str, gpu=bool)
-        #   new: run_bet(input_paths=[str], output_paths=[str], gpu=bool)
+        #   new: run_bet(input_paths=[str], brain_paths=[str], mask_paths=[str], gpu=bool)
         import inspect
         sig = inspect.signature(run_bet)
-        params = list(sig.parameters.keys())
+        params = set(sig.parameters.keys())
 
         use_cuda = use_gpu and torch.cuda.is_available()
 
         if "input_paths" in params:
-            # New API (deepbet >= 1.x)
             run_bet(
                 input_paths=[str(t1w_path)],
-                output_paths=[str(mask_path)],
+                brain_paths=[str(brain_path)],
+                mask_paths=[str(mask_path)],
                 gpu=use_cuda,
             )
         else:
-            # Old API
             run_bet(
                 input=str(t1w_path),
                 output=str(mask_path),
