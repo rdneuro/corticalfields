@@ -179,18 +179,15 @@ def skull_strip_deepbet(
 
         mask_path = output_dir / "brain_mask.nii.gz"
         brain_path = output_dir / "brain.nii.gz"
+        tiv_path = output_dir / "tiv.csv"
 
-        # deepbet API (from README):
-        #   run_bet(input_paths, brain_paths, mask_paths, tiv_paths,
-        #           threshold=.5, n_dilate=0, no_gpu=False)
-        # All positional, all lists. GPU flag is inverted: no_gpu=False means USE gpu.
         use_cuda = use_gpu and torch.cuda.is_available()
 
         run_bet(
-            [str(t1w_path)],           # input_paths
-            [str(brain_path)],         # brain_paths
-            [str(mask_path)],          # mask_paths
-            [],                        # tiv_paths (not needed)
+            [str(t1w_path)],
+            [str(brain_path)],
+            [str(mask_path)],
+            [str(tiv_path)],
             threshold=0.5,
             n_dilate=0,
             no_gpu=(not use_cuda),
