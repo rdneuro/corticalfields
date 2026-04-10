@@ -44,6 +44,22 @@ from corticalfields._pointcloud_legacy import (
 # ── New submodule lazy imports ───────────────────────────────────────────
 # Heavy GPU modules are loaded on first access to keep top-level import fast.
 
+# ── t1w_pipeline: whole-brain FS-free extraction (eager — lightweight) ───
+from corticalfields.pointcloud.t1w_pipeline import (
+    T1wPCDPipeline,
+    T1wPipelineResult,
+    PCDResult,
+    extract_whole_brain_pcd,
+    extract_cortical_hemispheres,
+    skull_strip_deepbet,
+    segment_volume,
+    split_hemispheres,
+    extract_structure_pcd,
+    extract_cortical_gm_pcd,
+    SUBCORTICAL_LABELS,
+    HIPPOCAMPAL_LABELS,
+)
+
 _LAZY_SUBMODULES = {
     "spectral",
     "functional_maps",
@@ -52,6 +68,7 @@ _LAZY_SUBMODULES = {
     "morphometrics",
     "viz",
     "deep",
+    "t1w_pipeline",
 }
 
 
@@ -87,4 +104,18 @@ __all__ = [
     "morphometrics",
     "viz",
     "deep",
+    "t1w_pipeline",
+    # t1w_pipeline re-exports
+    "T1wPCDPipeline",
+    "T1wPipelineResult",
+    "PCDResult",
+    "extract_whole_brain_pcd",
+    "extract_cortical_hemispheres",
+    "skull_strip_deepbet",
+    "segment_volume",
+    "split_hemispheres",
+    "extract_structure_pcd",
+    "extract_cortical_gm_pcd",
+    "SUBCORTICAL_LABELS",
+    "HIPPOCAMPAL_LABELS",
 ]

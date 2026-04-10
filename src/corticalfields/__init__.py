@@ -6,7 +6,7 @@ functional maps, optimal-transport distances, and information-theoretic
 surprise maps on brain surface meshes.  Designed for structural MRI (T1w)
 data in clinical neuroimaging, with emphasis on epilepsy (MTLE-HS).
 
-Subpackages (v0.2.1)
+Subpackages (v0.2.6)
 ---------------------
 analysis       : Statistical analysis & modeling
     analysis.stats      — MCC, GLM, PERMANOVA, CCA/PLS, RSA, NBS,
@@ -29,7 +29,7 @@ surface, subcortical, hippocampus, spectral, kernels, surprise, features,
 graphs, distance_stats, asymmetry, transport, functional_maps, datasets, utils
 """
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 __author__ = "rdneuro"
 
 
@@ -58,6 +58,19 @@ def __getattr__(name: str):
         "T1wExtractionResult": ("corticalfields.pointcloud", "T1wExtractionResult"),
         "compute_mesh_laplacian": ("corticalfields.pointcloud", "compute_mesh_laplacian"),
         "compute_mesh_eigenpairs": ("corticalfields.pointcloud", "compute_mesh_eigenpairs"),
+        # pointcloud.t1w_pipeline (v0.2.6)
+        "T1wPCDPipeline": ("corticalfields.pointcloud.t1w_pipeline", "T1wPCDPipeline"),
+        "T1wPipelineResult": ("corticalfields.pointcloud.t1w_pipeline", "T1wPipelineResult"),
+        "PCDResult": ("corticalfields.pointcloud.t1w_pipeline", "PCDResult"),
+        "extract_whole_brain_pcd": ("corticalfields.pointcloud.t1w_pipeline", "extract_whole_brain_pcd"),
+        "extract_cortical_hemispheres": ("corticalfields.pointcloud.t1w_pipeline", "extract_cortical_hemispheres"),
+        "skull_strip_deepbet": ("corticalfields.pointcloud.t1w_pipeline", "skull_strip_deepbet"),
+        "segment_volume": ("corticalfields.pointcloud.t1w_pipeline", "segment_volume"),
+        "split_hemispheres": ("corticalfields.pointcloud.t1w_pipeline", "split_hemispheres"),
+        "extract_structure_pcd": ("corticalfields.pointcloud.t1w_pipeline", "extract_structure_pcd"),
+        "extract_cortical_gm_pcd": ("corticalfields.pointcloud.t1w_pipeline", "extract_cortical_gm_pcd"),
+        "SUBCORTICAL_LABELS": ("corticalfields.pointcloud.t1w_pipeline", "SUBCORTICAL_LABELS"),
+        "HIPPOCAMPAL_LABELS": ("corticalfields.pointcloud.t1w_pipeline", "HIPPOCAMPAL_LABELS"),
         # batch processing (in spectral.py)
         "batch_compute_eigenpairs": ("corticalfields.spectral", "batch_compute_eigenpairs"),
         "SubjectMesh": ("corticalfields.spectral", "SubjectMesh"),
@@ -330,4 +343,10 @@ __all__ = [
     "plot_graph_composite", "save_graph_figure",
     # ── utils (progress bars) ─────────────────────────────────────────
     "cf_progress",
+    # ── pointcloud.t1w_pipeline (v0.2.6) ─────────────────────────────
+    "T1wPCDPipeline", "T1wPipelineResult", "PCDResult",
+    "extract_whole_brain_pcd", "extract_cortical_hemispheres",
+    "skull_strip_deepbet", "segment_volume", "split_hemispheres",
+    "extract_structure_pcd", "extract_cortical_gm_pcd",
+    "SUBCORTICAL_LABELS", "HIPPOCAMPAL_LABELS",
 ]
