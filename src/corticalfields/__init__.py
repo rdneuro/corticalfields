@@ -6,7 +6,7 @@ functional maps, optimal-transport distances, and information-theoretic
 surprise maps on brain surface meshes.  Designed for structural MRI (T1w)
 data in clinical neuroimaging, with emphasis on epilepsy (MTLE-HS).
 
-Subpackages (v0.2.3)
+Subpackages (v0.2.1)
 ---------------------
 analysis       : Statistical analysis & modeling
     analysis.stats      — MCC, GLM, PERMANOVA, CCA/PLS, RSA, NBS,
@@ -29,7 +29,7 @@ surface, subcortical, hippocampus, spectral, kernels, surprise, features,
 graphs, distance_stats, asymmetry, transport, functional_maps, datasets, utils
 """
 
-__version__ = "0.2.3"
+__version__ = "0.2.2"
 __author__ = "rdneuro"
 
 
@@ -100,7 +100,7 @@ def __getattr__(name: str):
         "to_latex_table": ("corticalfields.analysis.bayesian", "to_latex_table"),
         "elicit_prior": ("corticalfields.analysis.bayesian", "elicit_prior"),
         "enigma_informed_prior": ("corticalfields.analysis.bayesian", "enigma_informed_prior"),
-        # ── analysis.stats  ─────────────────────────────────
+        # ── analysis.stats (NEW v0.2.2) ─────────────────────────────────
         "StatResult": ("corticalfields.analysis.stats", "StatResult"),
         "MultipleComparisonResult": ("corticalfields.analysis.stats", "MultipleComparisonResult"),
         "fdr_correction": ("corticalfields.analysis.stats", "fdr_correction"),
@@ -128,7 +128,7 @@ def __getattr__(name: str):
         "conformal_prediction_intervals": ("corticalfields.analysis.stats", "conformal_prediction_intervals"),
         "bootstrap_gpu": ("corticalfields.analysis.stats", "bootstrap_gpu"),
         "permutation_matrix_gpu": ("corticalfields.analysis.stats", "permutation_matrix_gpu"),
-        # ── graphs.py  ──────────────────────────────────
+        # ── graphs.py (REWRITTEN v0.2.2) ──────────────────────────────────
         "GraphResult": ("corticalfields.graphs", "GraphResult"),
         "GraphMetrics": ("corticalfields.graphs", "GraphMetrics"),
         "morphometric_similarity_network": ("corticalfields.graphs", "morphometric_similarity_network"),
@@ -150,7 +150,7 @@ def __getattr__(name: str):
         "BrainGraphGCN": ("corticalfields.graphs", "BrainGraphGCN"),
         "spectral_morphometric_pipeline": ("corticalfields.graphs", "spectral_morphometric_pipeline"),
         "YEO7_COLORS": ("corticalfields.graphs", "YEO7_COLORS"),
-        # ── viz.graph_viz (NEW v0.2.3) ───────────────────────────────────
+        # ── viz.graph_viz (NEW v0.2.2) ───────────────────────────────────
         "plot_glass_brain_connectome": ("corticalfields.viz.graph_viz", "plot_glass_brain_connectome"),
         "plot_adjacency_matrix": ("corticalfields.viz.graph_viz", "plot_adjacency_matrix"),
         "plot_edge_weight_distribution": ("corticalfields.viz.graph_viz", "plot_edge_weight_distribution"),
@@ -310,7 +310,7 @@ __all__ = [
     "estimate_n_eigenpairs", "gc_gpu", "vram_report", "vram_guard",
     "fetch_toy_dataset", "clear_toy_dataset",
     "load_example_surface", "ToyDataset",
-    # ── graphs (v0.2.3) ──────────────────────────────────────────────
+    # ── graphs (v0.2.2) ──────────────────────────────────────────────
     "GraphResult", "GraphMetrics",
     "morphometric_similarity_network", "spectral_similarity_network",
     "mind_divergence_network", "wasserstein_spectral_network",
@@ -321,7 +321,7 @@ __all__ = [
     "persistent_homology", "nbs_morphometric", "group_metric_comparison",
     "to_pyg_data", "build_population_graph", "BrainGraphGCN",
     "spectral_morphometric_pipeline", "YEO7_COLORS",
-    # ── viz.graph_viz (v0.2.3) ────────────────────────────────────────
+    # ── viz.graph_viz (v0.2.2) ────────────────────────────────────────
     "plot_glass_brain_connectome", "plot_adjacency_matrix",
     "plot_edge_weight_distribution", "plot_laplacian_spectrum",
     "plot_graph_layout", "plot_rich_club_curve", "plot_nbs_result",

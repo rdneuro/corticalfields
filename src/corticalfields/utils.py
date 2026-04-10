@@ -71,16 +71,34 @@ def gc_gpu() -> None:
     """
     Aggressively free GPU memory across all available backends.
 
-    Calls ``torch.cuda.empty_cache()``, ``cupy.get_default_memory_pool().free_all_blocks()``,
-    and Python garbage collector. Safe to call even when no GPU or backends are available.
+    Uses a **double-tap** pattern: ``gc.collect()`` →
+    ``empty_cache()`` → ``gc.collect()`` → ``empty_cache()`` to
+    ensure Python cyclic references holding CUDA tensors are fully
+    broken before the caching allocator releases blocks.  Critical
+    for multi-subject batch pipelines where VRAM fragmentation
+    accumulates over hundreds of subjects.
+
+    Safe to call even when no GPU or backends are available.
     """
     import gc
+
+    # First pass: break Python references → free CUDA tensors
     gc.collect()
 
     try:
         import torch
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+    # Second pass: catch cyclic refs that survived first gc
+    gc.collect()
+
+    try:
+        import torch
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except ImportError:
         pass
