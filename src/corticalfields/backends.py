@@ -439,8 +439,6 @@ def _eigsh_torch(
     3. **ChFSI outer loop** (typically 15–40 iterations):
        a. Apply degree-``d`` Chebyshev polynomial filter via 3-term
           SpMV recurrence (no matrix assembly — only matvecs).
-          The filter amplifies components in ``[0, λ_cutoff]`` and
-          damps the rest, concentrating V into the target eigenspace.
        b. Orthogonalise:  ``V, _ = QR(filtered_V)``.
        c. Rayleigh–Ritz:  ``H = Vᵀ A V``  (m×m dense eigh).
        d. Convergence check: max residual norm < tol.
@@ -448,11 +446,28 @@ def _eigsh_torch(
 
     Mixed precision
     ---------------
-    SpMV and the Chebyshev filter run in **float32** for ~2× throughput
-    on modern GPUs.  The Rayleigh–Ritz projection (small m×m problem)
-    is accumulated and solved in **float64** for numerical stability.
-    This preserves eigenvalue accuracy to ~1e-7 for the first ~300
-    Laplace–Beltrami eigenpairs while halving SpMV memory bandwidth.
+    SpMV and the Chebyshev filter run in **float32** for ~2× throughput.
+    The Rayleigh–Ritz projection (small m×m) is accumulated in **float64**.
+
+    GPU stability
+    -------------
+    The NVIDIA driver's GPU watchdog timer can trigger a PCIe bus hang
+    if the GPU command queue grows unboundedly without CPU sync points.
+    This function inserts ``torch.cuda.synchronize()`` at three levels:
+
+    - **After each Chebyshev filter pass** (every ~12 SpMV launches)
+    - **After every Rayleigh–Ritz step** (before convergence check)
+    - **Periodic ``empty_cache()``** every 5 outer iterations
+
+    These add ~1 ms overhead per sync but prevent the driver from
+    interpreting a deep async queue as a hung GPU.  Critical on X570
+    chipsets (e.g. ASUS Crosshair Dark Hero) with drivers ≥ 560.x
+    and CUDA ≥ 12.x, where failed GPU resets cascade to PCIe bus
+    hangs and apparent filesystem loss.
+
+    All operations run inside ``torch.no_grad()`` to prevent autograd
+    from tracking the ~500 SpMV operations, which would otherwise
+    build a 10+ GB computation graph in RAM.
 
     VRAM budget (N = 150k, k = 300, m = 330)
     ------------------------------------------
@@ -461,29 +476,10 @@ def _eigsh_torch(
     - Chebyshev temps:      2 × N × m × 4 = ~396 MB  (Y_prev, Y_curr)
     - Rayleigh–Ritz H:      m × m × 8 = ~0.9 MB  (float64)
     - **Peak total:         ~609 MB** — fits in 8 GB VRAM with margin.
-    - Previous lobpcg:      9 × N × k × 8 = ~3.2 GB — 5× higher.
-
-    Performance (RTX 3090, N=150k, k=300)
-    -------------------------------------
-    - ChFSI (this):       ~10–25 s  (degree=12, 15–30 outer iters)
-    - torch.lobpcg (old): ~60–120 s
-    - CuPy eigsh:         ~10–30 s  (Thick-Restart Lanczos)
-    - scipy eigsh:        ~30–120 s (ARPACK shift-invert)
-
-    Both individual and batch processing use this function.  In batch
-    mode, ``gc_gpu()`` is called between subjects by the caller
-    (``_process_single_subject`` in ``spectral.py``), which frees
-    VRAM for the next subject.
 
     Parameters
     ----------
-    L : scipy.sparse.spmatrix (N, N) — stiffness matrix
-    M : scipy.sparse.spmatrix (N, N) — diagonal lumped mass matrix
-    k : int — number of smallest eigenpairs to compute
-    tol : float — convergence tolerance on max residual norm
-    maxiter : int — maximum ChFSI outer iterations
-    dtype : str — ``"float32"`` or ``"float64"`` for SpMV precision;
-        Rayleigh–Ritz always uses float64 regardless.
+    L, M, k, tol, maxiter, dtype : see ``eigsh_solve``
 
     Returns
     -------
@@ -492,28 +488,25 @@ def _eigsh_torch(
 
     References
     ----------
-    [1] Y. Zhou, Y. Saad, M.L. Tiago & J.R. Chelikowsky,
-        "Self-consistent-field calculations using Chebyshev-filtered
-        subspace iteration", J. Comput. Phys. 219 (2006) 172–184.
-    [2] A.V. Knyazev, "Toward the optimal preconditioned eigensolver:
-        LOBPCG", SIAM J. Sci. Comput. 23 (2001) 517–541.
+    [1] Y. Zhou, Y. Saad et al., "Chebyshev-filtered subspace iteration",
+        J. Comput. Phys. 219 (2006) 172–184.
     """
     import torch
 
     # ── Precision setup ─────────────────────────────────────────────
-    # SpMV in float32 for throughput; Rayleigh-Ritz in float64 for accuracy
-    spmv_np_dtype = np.float32 if dtype != "float64" else np.float32
+    spmv_np_dtype = np.float32
     spmv_torch_dtype = torch.float32
     ritz_torch_dtype = torch.float64
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    is_cuda = device.type == "cuda"
     N = L.shape[0]
 
     # ChFSI hyperparameters — calibrated for LBO meshes
-    EXTRA = min(30, max(10, k // 10))     # oversampling for Ritz stability
-    m = k + EXTRA                          # subspace dimension
-    CHEB_DEGREE = 12                       # Chebyshev filter polynomial degree
-    POWER_ITERS = 30                       # for λ_max estimation
+    EXTRA = min(30, max(10, k // 10))
+    m = k + EXTRA
+    CHEB_DEGREE = 12
+    POWER_ITERS = 30
 
     logger.info(
         "  torch ChFSI eigensolver: N=%d, k=%d, m=%d, degree=%d, "
@@ -524,11 +517,11 @@ def _eigsh_torch(
     # ── Step 1: Generalised → standard via M^{−½} (on CPU) ─────────
     M_diag = np.array(M.diagonal()).ravel().astype(np.float64)
     M_diag = np.maximum(M_diag, 1e-16)
-    M_inv_sqrt_np = (1.0 / np.sqrt(M_diag))  # float64 for precision
+    M_inv_sqrt_np = 1.0 / np.sqrt(M_diag)  # float64 for precision
 
     D_sp = sp.diags(M_inv_sqrt_np.astype(spmv_np_dtype), format="csc")
     A_cpu = (D_sp @ L.tocsc().astype(spmv_np_dtype) @ D_sp).tocsr()
-    del D_sp  # free CPU temp
+    del D_sp
 
     # ── Helper: scipy CSR → torch sparse CSR on device ──────────────
     def _scipy_to_torch_csr(mat_csr):
@@ -540,161 +533,159 @@ def _eigsh_torch(
             dtype=spmv_torch_dtype,
         )
 
-    # ── Helper: sparse matvec A @ X on GPU ──────────────────────────
-    def _spmm(A_t, X):
-        """Sparse × dense matrix multiply, shape (N, m)."""
-        return torch.sparse.mm(A_t, X)
-
     try:
-        # ── Step 2: Transfer A to GPU ───────────────────────────────
         A_t = _scipy_to_torch_csr(A_cpu)
-        del A_cpu  # free CPU copy (~14 MB saved)
+        del A_cpu
 
-        # ── Step 3: Estimate λ_max via power iteration ──────────────
-        # 30 iters is overkill for Rayleigh quotient convergence on
-        # a mesh Laplacian, but costs only ~15 ms and gives a tight
-        # bound that improves Chebyshev filter quality.
-        torch.manual_seed(42)
-        v = torch.randn(N, 1, dtype=spmv_torch_dtype, device=device)
-        v = v / v.norm()
-        for _ in range(POWER_ITERS):
-            v = _spmm(A_t, v)
+        # Everything below is inference — no autograd needed.
+        # torch.no_grad() prevents building a massive computation graph
+        # from the ~500 SpMV calls (would leak ~10+ GB of RAM otherwise).
+        with torch.no_grad():
+
+            # ── Step 2: Estimate λ_max via power iteration ──────────
+            torch.manual_seed(42)
+            v = torch.randn(N, 1, dtype=spmv_torch_dtype, device=device)
             v = v / v.norm()
-        # Rayleigh quotient in float64 for a precise λ_max
-        v64 = v.to(ritz_torch_dtype)
-        Av64 = _spmm(A_t, v).to(ritz_torch_dtype)
-        lambda_max = float((v64.T @ Av64).item()) * 1.05  # 5% safety
-        del v, v64, Av64
-        logger.info("    λ_max ≈ %.4f", lambda_max)
+            for pi in range(POWER_ITERS):
+                v = torch.sparse.mm(A_t, v)
+                v = v / v.norm()
+                # Sync every 10 iters to keep driver watchdog happy
+                if is_cuda and pi % 10 == 9:
+                    torch.cuda.synchronize()
 
-        # ── Step 4: ChFSI outer loop ───────────────────────────────
-        # Initial random subspace
-        torch.manual_seed(42)
-        V = torch.randn(N, m, dtype=spmv_torch_dtype, device=device)
-        V, _ = torch.linalg.qr(V)
+            # Rayleigh quotient in float64 for a precise λ_max
+            v64 = v.to(ritz_torch_dtype)
+            Av64 = torch.sparse.mm(A_t, v).to(ritz_torch_dtype)
+            lambda_max = float((v64.T @ Av64).item()) * 1.05
+            del v, v64, Av64
+            if is_cuda:
+                torch.cuda.synchronize()
+            logger.info("    λ_max ≈ %.4f", lambda_max)
 
-        # Chebyshev filter interval: we want eigenvalues in [0, λ_cut]
-        # where λ_cut is a rough upper bound for the k-th eigenvalue.
-        # Heuristic: Weyl's law gives λ_k ∝ k for 2D surfaces, so
-        # λ_cut ≈ λ_max × (2 * m / N) is a conservative estimate.
-        # We refine after the first Ritz step.
-        lambda_cut = lambda_max * (2.0 * m / N)
-        lambda_cut = max(lambda_cut, lambda_max * 0.01)  # floor
+            # ── Step 3: ChFSI outer loop ────────────────────────────
+            torch.manual_seed(42)
+            V = torch.randn(N, m, dtype=spmv_torch_dtype, device=device)
+            V, _ = torch.linalg.qr(V)
 
-        converged = False
-        for outer in range(maxiter):
-            # ── Chebyshev filter: T_d(scaled_A) @ V ────────────────
-            # Maps A from [λ_cut, λ_max] → [−1, 1], then applies
-            # Chebyshev polynomial that is ~0 on [−1, 1] (unwanted
-            # eigenvalues) and large on (−∞, −1) (wanted eigenvalues).
-            #
-            # Scaling:  σ = (λ_max − λ_cut) / 2
-            #           c = (λ_max + λ_cut) / 2
-            #           A_scaled = (A − c·I) / σ
-            #
-            # 3-term recurrence:
-            #   Y₀ = V
-            #   Y₁ = (1/σ)(A − c·I) V = (A·V − c·V) / σ
-            #   Y_{j+1} = (2/σ)(A − c·I) Y_j − Y_{j−1}
-            #            = (2(A·Y_j − c·Y_j) / σ) − Y_{j−1}
+            lambda_cut = lambda_max * (2.0 * m / N)
+            lambda_cut = max(lambda_cut, lambda_max * 0.01)
 
-            e = (lambda_max - lambda_cut) / 2.0
-            c = (lambda_max + lambda_cut) / 2.0
+            converged = False
+            max_res = float("inf")
 
-            # Safeguard: e must be positive
-            if e < 1e-10:
-                e = lambda_max * 0.5
-                c = lambda_max * 0.5
+            for outer in range(maxiter):
 
-            sigma = e / c if abs(c) > 1e-12 else 1.0
-            sigma1 = sigma
+                # ── Chebyshev filter: T_d(scaled_A) @ V ─────────────
+                e = (lambda_max - lambda_cut) / 2.0
+                c_coeff = (lambda_max + lambda_cut) / 2.0
 
-            # Y₀ = V (reuse V buffer)
-            # Y₁ = σ₁/e · (A·V − c·V)
-            AV = _spmm(A_t, V)                          # (N, m) f32
-            Y_prev = V                                   # alias, no copy
-            Y_curr = (sigma1 / e) * (AV - c * V)        # (N, m) f32
-            del AV
+                if e < 1e-10:
+                    e = lambda_max * 0.5
+                    c_coeff = lambda_max * 0.5
 
-            for d in range(2, CHEB_DEGREE + 1):
-                sigma_new = 1.0 / (2.0 / sigma - sigma1)
-                AY = _spmm(A_t, Y_curr)                 # (N, m) f32
-                Y_next = (2.0 * sigma_new / e) * (AY - c * Y_curr) \
-                         - (sigma * sigma_new) * Y_prev
-                Y_prev = Y_curr
-                Y_curr = Y_next
-                sigma = sigma_new
-                del AY
+                sigma = e / c_coeff if abs(c_coeff) > 1e-12 else 1.0
+                sigma1 = sigma
 
-            del Y_prev  # free (N, m) buffer
+                # Y₁ = (σ₁/e) · (A·V − c·V)
+                AV = torch.sparse.mm(A_t, V)
+                Y_prev = V
+                Y_curr = (sigma1 / e) * (AV - c_coeff * V)
+                del AV
 
-            # ── Orthogonalise filtered subspace ────────────────────
-            V, _ = torch.linalg.qr(Y_curr)
-            del Y_curr
+                for d in range(2, CHEB_DEGREE + 1):
+                    sigma_new = 1.0 / (2.0 / sigma - sigma1)
+                    AY = torch.sparse.mm(A_t, Y_curr)
+                    Y_next = (2.0 * sigma_new / e) * (AY - c_coeff * Y_curr) \
+                             - (sigma * sigma_new) * Y_prev
+                    Y_prev = Y_curr
+                    Y_curr = Y_next
+                    sigma = sigma_new
+                    del AY
+                    # Mid-filter sync every 4 SpMV to prevent driver timeout
+                    if is_cuda and d % 4 == 0:
+                        torch.cuda.synchronize()
 
-            # ── Rayleigh–Ritz in float64 ──────────────────────────
-            # AV in float32 for speed, then upcast for the small eigh
-            AV = _spmm(A_t, V)                           # (N, m) f32
-            V64 = V.to(ritz_torch_dtype)                  # (N, m) f64
-            AV64 = AV.to(ritz_torch_dtype)                # (N, m) f64
-            del AV
+                del Y_prev
 
-            H = V64.T @ AV64                             # (m, m) f64
-            H = 0.5 * (H + H.T)                          # symmetrise
-            ritz_vals, ritz_vecs = torch.linalg.eigh(H)   # sorted ascending
+                # ── SYNC: end of Chebyshev filter ───────────────────
+                if is_cuda:
+                    torch.cuda.synchronize()
 
-            # ── Convergence check: max residual norm ───────────────
-            # residual_i = A·z_i − λ_i·z_i  where z_i = V @ s_i
-            eigvecs_m = V64 @ ritz_vecs[:, :k]            # (N, k) f64
-            Aeigvecs = AV64 @ ritz_vecs[:, :k]            # (N, k) f64
-            residuals = Aeigvecs - eigvecs_m * ritz_vals[:k].unsqueeze(0)
-            max_res = float(residuals.norm(dim=0).max().item())
+                # ── Orthogonalise filtered subspace ─────────────────
+                V, _ = torch.linalg.qr(Y_curr)
+                del Y_curr
 
-            del eigvecs_m, Aeigvecs, residuals, V64, AV64
+                # ── Rayleigh–Ritz in float64 ────────────────────────
+                AV = torch.sparse.mm(A_t, V)
+                V64 = V.to(ritz_torch_dtype)
+                AV64 = AV.to(ritz_torch_dtype)
+                del AV
 
-            if outer % 5 == 0 or max_res < tol:
-                logger.info(
-                    "    ChFSI iter %2d: max_residual=%.2e, λ_cut=%.4f",
-                    outer, max_res, lambda_cut,
+                H = V64.T @ AV64
+                H = 0.5 * (H + H.T)
+                ritz_vals, ritz_vecs = torch.linalg.eigh(H)
+
+                # ── Convergence check ───────────────────────────────
+                eigvecs_m = V64 @ ritz_vecs[:, :k]
+                Aeigvecs = AV64 @ ritz_vecs[:, :k]
+                residuals = Aeigvecs - eigvecs_m * ritz_vals[:k].unsqueeze(0)
+                max_res = float(residuals.norm(dim=0).max().item())
+
+                del eigvecs_m, Aeigvecs, residuals, V64, AV64
+
+                # ── SYNC: end of Ritz step ──────────────────────────
+                if is_cuda:
+                    torch.cuda.synchronize()
+
+                if outer % 5 == 0 or max_res < tol:
+                    logger.info(
+                        "    ChFSI iter %2d: max_residual=%.2e, λ_cut=%.4f",
+                        outer, max_res, lambda_cut,
+                    )
+
+                if max_res < tol:
+                    converged = True
+                    break
+
+                # Update subspace
+                V = V @ ritz_vecs[:, :m].to(spmv_torch_dtype)
+
+                # Refine λ_cut from current Ritz estimates
+                if ritz_vals.shape[0] > k:
+                    lambda_cut = float(ritz_vals[m - 1].item()) * 1.5
+                    lambda_cut = min(lambda_cut, lambda_max * 0.95)
+
+                # Periodic VRAM housekeeping — prevents fragmentation
+                if is_cuda and outer % 5 == 4:
+                    torch.cuda.empty_cache()
+
+            # ── end outer loop ──────────────────────────────────────
+
+            if not converged:
+                logger.warning(
+                    "  ChFSI did not converge in %d iters "
+                    "(max_residual=%.2e > tol=%.1e). "
+                    "Results may be approximate.",
+                    maxiter, max_res, tol,
                 )
 
-            if max_res < tol:
-                converged = True
-                break
+            # ── Extract final eigenpairs ────────────────────────────
+            evals_t = ritz_vals[:k]
+            evecs_t = V.to(ritz_torch_dtype) @ ritz_vecs[:, :k]
 
-            # ── Update subspace: rotate V into Ritz basis ──────────
-            V = V @ ritz_vecs[:, :m].to(spmv_torch_dtype)
+            M_inv_sqrt_t = torch.from_numpy(
+                M_inv_sqrt_np
+            ).to(dtype=ritz_torch_dtype, device=device).unsqueeze(1)
 
-            # ── Refine λ_cut from current Ritz estimates ───────────
-            # Use 1.5× the m-th Ritz value as the new cutoff
-            if ritz_vals.shape[0] > k:
-                lambda_cut = float(ritz_vals[m - 1].item()) * 1.5
-                lambda_cut = min(lambda_cut, lambda_max * 0.95)
+            evecs_t = evecs_t * M_inv_sqrt_t
+            del M_inv_sqrt_t, V, ritz_vals, ritz_vecs
 
-        if not converged:
-            logger.warning(
-                "  ChFSI did not converge in %d iters "
-                "(max_residual=%.2e > tol=%.1e). Results may be approximate.",
-                maxiter, max_res, tol,
-            )
-
-        # ── Step 5: Extract final eigenpairs ────────────────────────
-        evals_t = ritz_vals[:k]                           # (k,) f64 on GPU
-        # Final eigenvectors: V @ ritz_vecs[:, :k] in float64
-        evecs_t = V.to(ritz_torch_dtype) @ ritz_vecs[:, :k]  # (N, k) f64
-
-        # ── Step 6: Undo mass-matrix transform: φ = M^{−½} · y ────
-        M_inv_sqrt_t = torch.from_numpy(
-            M_inv_sqrt_np
-        ).to(dtype=ritz_torch_dtype, device=device).unsqueeze(1)  # (N, 1)
-
-        evecs_t = evecs_t * M_inv_sqrt_t                  # (N, k) f64
-        del M_inv_sqrt_t, V, ritz_vals, ritz_vecs
-
-        # Move to CPU
-        evals = evals_t.cpu().numpy().astype(np.float64)
-        evecs = evecs_t.cpu().numpy().astype(np.float64)
-        del evals_t, evecs_t
+            # Move to CPU
+            if is_cuda:
+                torch.cuda.synchronize()
+            evals = evals_t.cpu().numpy().astype(np.float64)
+            evecs = evecs_t.cpu().numpy().astype(np.float64)
+            del evals_t, evecs_t
 
     finally:
         # Guarantee GPU cleanup even on error — critical for batch mode
