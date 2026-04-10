@@ -316,14 +316,19 @@ def _try_synthseg(
     # ── Attempt 1: subprocess.run (preferred — captures errors) ──────────
     if synthseg_bin is not None:
         try:
+            # mri_synthseg CLI flags (from --help):
+            #   --i I        Input image
+            #   --o O        Output segmentation
+            #   --robust     Robust mode
+            #   --cpu        Force CPU (GPU is the DEFAULT — no --gpu flag exists)
             cmd = [
                 synthseg_bin,
                 "--i", str(t1w_path),
                 "--o", str(aseg_path),
                 "--robust",
             ]
-            if use_gpu:
-                cmd.append("--gpu")
+            if not use_gpu:
+                cmd.append("--cpu")
 
             logger.info(f"Running: {' '.join(cmd)}")
             subprocess.run(cmd, check=True, capture_output=True, timeout=900)
@@ -339,11 +344,11 @@ def _try_synthseg(
     # ── Attempt 2: os.system fallback (inherits full shell env) ──────────
     # This catches cases where FS is sourced in .bashrc but subprocess
     # doesn't inherit those paths (common in conda + Spyder setups).
-    gpu_flag = "--gpu" if use_gpu else ""
+    cpu_flag = "--cpu" if not use_gpu else ""
     shell_cmd = (
         f'mri_synthseg --i "{t1w_path}" --o "{aseg_path}" '
-        f'--robust {gpu_flag}'
-    )
+        f'--robust {cpu_flag}'
+    ).strip()
     logger.info(f"Trying os.system fallback: {shell_cmd}")
     ret = os.system(shell_cmd)
 
