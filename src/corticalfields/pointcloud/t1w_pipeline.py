@@ -179,12 +179,29 @@ def skull_strip_deepbet(
 
         mask_path = output_dir / "brain_mask.nii.gz"
 
-        # deepbet expects a path, writes mask to disk
-        run_bet(
-            input=str(t1w_path),
-            output=str(mask_path),
-            gpu=use_gpu and torch.cuda.is_available(),
-        )
+        # deepbet API changed across versions:
+        #   old: run_bet(input=str, output=str, gpu=bool)
+        #   new: run_bet(input_paths=[str], output_paths=[str], gpu=bool)
+        import inspect
+        sig = inspect.signature(run_bet)
+        params = list(sig.parameters.keys())
+
+        use_cuda = use_gpu and torch.cuda.is_available()
+
+        if "input_paths" in params:
+            # New API (deepbet >= 1.x)
+            run_bet(
+                input_paths=[str(t1w_path)],
+                output_paths=[str(mask_path)],
+                gpu=use_cuda,
+            )
+        else:
+            # Old API
+            run_bet(
+                input=str(t1w_path),
+                output=str(mask_path),
+                gpu=use_cuda,
+            )
 
         mask_img = nib.load(str(mask_path))
         brain_mask = np.asarray(mask_img.dataobj).astype(bool)
