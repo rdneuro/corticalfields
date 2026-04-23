@@ -393,61 +393,188 @@ class HippocampalSurface(SubcorticalSurface):
 
 def load_hippocampal_surface(hippunfold_dir, subject_id, hemi="lh", *, density="0p5mm",
                              label="hipp", space="T1w", surf_type="midthickness",
+                             atlas="multihist7",
                              load_overlays=True, load_subfields=True, load_unfolded=True,
                              load_coords=True):
-    """Load HippUnfold hippocampal surface with all available data."""
-    import nibabel as nib
-    hdir = Path(hippunfold_dir); hb = "L" if hemi == "lh" else "R"; prefix = f"sub-{subject_id}"
+    """Load HippUnfold hippocampal surface with all available data.
 
+    Supports both HippUnfold **v1** (density ``0p5mm/1mm/2mm``, overlays
+    with ``space-`` entity) and **v2** (density ``2k/8k/18k``, overlays
+    *without* ``space-`` entity, subfields with ``atlas-`` entity, coords
+    with ``dir-AP/PD`` prefix).  The function tries v2 naming first, then
+    falls back to v1 for each file type independently.
+
+    Parameters
+    ----------
+    hippunfold_dir : str or Path
+        Directory containing ``sub-{subject_id}/`` folders.
+    subject_id : str
+        Bare subject ID **without** the ``sub-`` prefix (the function
+        prepends it automatically).
+    hemi : str
+        ``'lh'`` or ``'rh'``.
+    density : str
+        Mesh density label.  Use ``'8k'`` for HippUnfold v2, ``'0p5mm'``
+        for v1.
+    label : str
+        Surface label: ``'hipp'``, ``'dentate'``, or ``'hippdentate'`` (v2).
+    space : str
+        Coordinate space for the surface mesh (``'T1w'``, ``'corobl'``).
+    surf_type : str
+        Surface type (``'midthickness'``, ``'inner'``, ``'outer'``).
+    atlas : str
+        Subfield atlas name used in the ``atlas-`` BIDS entity
+        (default ``'multihist7'``).  Set to ``None`` to omit the atlas
+        entity from the search (v1 style).
+    load_overlays, load_subfields, load_unfolded, load_coords : bool
+        Toggle loading of each data type.
+
+    Returns
+    -------
+    HippocampalSurface
+    """
+    import nibabel as nib
+    hdir = Path(hippunfold_dir)
+    hb = "L" if hemi == "lh" else "R"
+    prefix = f"sub-{subject_id}"
+
+    # ------------------------------------------------------------------
+    # _find: look for an exact filename across standard subdirectories,
+    # then fall back to recursive glob.
+    # ------------------------------------------------------------------
     def _find(parts):
         fname = "_".join(parts)
-        for sd in ["surf", "anat"]:
-            for base in [hdir/prefix/sd, hdir/"hippunfold"/prefix/sd]:
-                if (base/fname).exists(): return base/fname
+        for sd in ["surf", "anat", "coords"]:
+            for base in [hdir / prefix / sd,
+                         hdir / "hippunfold" / prefix / sd]:
+                if (base / fname).exists():
+                    return base / fname
         matches = list(hdir.rglob(fname))
         return matches[0] if matches else None
 
-    # Surface mesh
-    sp_ = _find([prefix, f"hemi-{hb}", f"space-{space}", f"den-{density}", f"label-{label}", f"{surf_type}.surf.gii"])
-    if sp_ is None: raise FileNotFoundError(f"Surface not found for {prefix} {hb} {label} in {hdir}")
-    gii = nib.load(str(sp_))
-    coords = gii.darrays[0].data.astype(np.float64); faces = gii.darrays[1].data.astype(np.int64)
+    def _find_first(*candidates):
+        """Try several part-lists, return first hit."""
+        for parts in candidates:
+            hit = _find(parts)
+            if hit is not None:
+                return hit
+        return None
 
-    # Overlays
+    # ------------------------------------------------------------------
+    # 1.  Surface mesh — always has space-{space} entity
+    # ------------------------------------------------------------------
+    sp_ = _find([prefix, f"hemi-{hb}", f"space-{space}",
+                 f"den-{density}", f"label-{label}",
+                 f"{surf_type}.surf.gii"])
+    if sp_ is None:
+        raise FileNotFoundError(
+            f"Surface not found for {prefix} {hb} {label} in {hdir}")
+    gii = nib.load(str(sp_))
+    coords = gii.darrays[0].data.astype(np.float64)
+    faces = gii.darrays[1].data.astype(np.int64)
+
+    # ------------------------------------------------------------------
+    # 2.  Overlays (thickness, curvature, gyrification, surfarea)
+    #     v2: NO space entity    → sub-X_hemi-L_den-8k_label-hipp_thickness.shape.gii
+    #     v1: HAS space entity   → sub-X_hemi-L_space-T1w_den-0p5mm_label-hipp_thickness.shape.gii
+    # ------------------------------------------------------------------
     overlays = {}
     if load_overlays:
         for mn in ["thickness", "curvature", "gyrification", "surfarea"]:
-            op = _find([prefix, f"hemi-{hb}", f"space-{space}", f"den-{density}", f"label-{label}", f"{mn}.shape.gii"])
-            if op: overlays[mn] = nib.load(str(op)).darrays[0].data.astype(np.float64)
+            # v2 pattern (no space)
+            v2 = [prefix, f"hemi-{hb}", f"den-{density}",
+                  f"label-{label}", f"{mn}.shape.gii"]
+            # v1 pattern (with space)
+            v1 = [prefix, f"hemi-{hb}", f"space-{space}",
+                  f"den-{density}", f"label-{label}", f"{mn}.shape.gii"]
+            op = _find_first(v2, v1)
+            if op is not None:
+                overlays[mn] = nib.load(str(op)).darrays[0].data.astype(
+                    np.float64)
 
-    # Subfield labels
+    # ------------------------------------------------------------------
+    # 3.  Subfield labels
+    #     v2: sub-X_hemi-L_den-8k_label-hipp_atlas-multihist7_subfields.label.gii
+    #     v1: sub-X_hemi-L_space-T1w_den-0p5mm_label-hipp_subfields.label.gii
+    # ------------------------------------------------------------------
     sf_labels = np.zeros(coords.shape[0], dtype=np.int32)
     if load_subfields:
-        sfp = _find([prefix, f"hemi-{hb}", f"space-{space}", f"den-{density}", f"label-{label}", "subfields.label.gii"])
-        if sfp: sf_labels = nib.load(str(sfp)).darrays[0].data.astype(np.int32)
+        candidates = []
+        # v2 with atlas entity (no space)
+        if atlas:
+            candidates.append(
+                [prefix, f"hemi-{hb}", f"den-{density}",
+                 f"label-{label}", f"atlas-{atlas}",
+                 "subfields.label.gii"])
+        # v2 without atlas entity (no space)
+        candidates.append(
+            [prefix, f"hemi-{hb}", f"den-{density}",
+             f"label-{label}", "subfields.label.gii"])
+        # v1 with space, with atlas
+        if atlas:
+            candidates.append(
+                [prefix, f"hemi-{hb}", f"space-{space}",
+                 f"den-{density}", f"label-{label}", f"atlas-{atlas}",
+                 "subfields.label.gii"])
+        # v1 with space, no atlas
+        candidates.append(
+            [prefix, f"hemi-{hb}", f"space-{space}",
+             f"den-{density}", f"label-{label}",
+             "subfields.label.gii"])
 
-    # Unfolded surface
+        sfp = _find_first(*candidates)
+        if sfp is not None:
+            sf_labels = nib.load(str(sfp)).darrays[0].data.astype(np.int32)
+
+    # ------------------------------------------------------------------
+    # 4.  Unfolded surface (space-unfold) — same naming in v1 & v2
+    # ------------------------------------------------------------------
     unf = None
     if load_unfolded:
-        ufp = _find([prefix, f"hemi-{hb}", "space-unfold", f"den-{density}", f"label-{label}", f"{surf_type}.surf.gii"])
-        if ufp: unf = nib.load(str(ufp)).darrays[0].data.astype(np.float64)
+        ufp = _find([prefix, f"hemi-{hb}", "space-unfold",
+                     f"den-{density}", f"label-{label}",
+                     f"{surf_type}.surf.gii"])
+        if ufp is not None:
+            unf = nib.load(str(ufp)).darrays[0].data.astype(np.float64)
 
-    # AP/PD coordinates
-    ap, pd = None, None
+    # ------------------------------------------------------------------
+    # 5.  AP / PD Laplace coordinates
+    #     v2: sub-X_dir-AP_hemi-L_den-8k_label-hipp_desc-laplace_coords.shape.gii
+    #     v1: sub-X_hemi-L_space-T1w_den-0p5mm_label-hipp_desc-AP_coords.shape.gii
+    # ------------------------------------------------------------------
+    ap, pd_ = None, None
     if load_coords:
         for cn, attr in [("AP", "ap"), ("PD", "pd")]:
-            cp = _find([prefix, f"hemi-{hb}", f"space-{space}", f"den-{density}", f"label-{label}", f"desc-{cn}", "coords.shape.gii"])
-            if cp:
+            # v2 pattern: dir-{cn} before hemi, desc-laplace, no space
+            v2 = [prefix, f"dir-{cn}", f"hemi-{hb}",
+                  f"den-{density}", f"label-{label}",
+                  "desc-laplace", "coords.shape.gii"]
+            # v1 pattern: desc-{cn} at end, with space
+            v1 = [prefix, f"hemi-{hb}", f"space-{space}",
+                  f"den-{density}", f"label-{label}",
+                  f"desc-{cn}", "coords.shape.gii"]
+            cp = _find_first(v2, v1)
+            if cp is not None:
                 val = nib.load(str(cp)).darrays[0].data.astype(np.float64)
-                if attr == "ap": ap = val
-                else: pd = val
+                if attr == "ap":
+                    ap = val
+                else:
+                    pd_ = val
 
     name = f"{'Left' if hemi=='lh' else 'Right'}-Hippocampus"
     return HippocampalSurface(
-        vertices=coords, faces=faces, structure=name, hemi=hemi, overlays=overlays,
-        metadata={"origin":"hippunfold", "hippunfold_dir":str(hdir), "subject_id":subject_id,
-                  "surf_path":str(sp_), "label":label, "space":space},
-        subfield_labels=sf_labels, ap_coord=ap, pd_coord=pd, unfolded_vertices=unf, density=density)
+        vertices=coords, faces=faces, structure=name, hemi=hemi,
+        overlays=overlays,
+        metadata={"origin": "hippunfold", "hippunfold_dir": str(hdir),
+                  "subject_id": subject_id, "surf_path": str(sp_),
+                  "label": label, "space": space,
+                  "volume_mm3": float(np.abs(
+                      np.einsum("ij,ij->i",
+                                coords[faces[:, 0]],
+                                np.cross(coords[faces[:, 1]] - coords[faces[:, 0]],
+                                         coords[faces[:, 2]] - coords[faces[:, 0]])).sum() / 6))},
+        subfield_labels=sf_labels, ap_coord=ap, pd_coord=pd_,
+        unfolded_vertices=unf, density=density)
 
 
 # ===================================================================
